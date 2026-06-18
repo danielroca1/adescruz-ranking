@@ -57,7 +57,7 @@ export default async function AdminRankingPage() {
                       <th className="text-left px-5 py-2.5 w-10">#</th>
                       <th className="text-left px-4 py-2.5">Jinete</th>
                       <th className="text-left px-4 py-2.5 hidden sm:table-cell">Caballo</th>
-                      <th className="text-right px-4 py-2.5 hidden md:table-cell">CDS</th>
+                      <th className="text-right px-4 py-2.5 hidden md:table-cell">Días</th>
                       <th className="text-right px-5 py-2.5">Puntos</th>
                     </tr>
                   </thead>

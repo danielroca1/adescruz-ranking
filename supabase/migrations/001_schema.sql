@@ -196,7 +196,7 @@ CREATE TABLE site_config (
 
 -- Seed default config values
 INSERT INTO site_config (key, value) VALUES
-  ('temporada_activa', '2025'),
+  ('temporada_activa', '2026'),
   ('nombre_organizacion', '"ADESCRUZ"'),
   ('nombre_completo', '"Asociación de Deportes Ecuestres de Santa Cruz"'),
   ('ciudad', '"Santa Cruz de la Sierra, Bolivia"');
@@ -271,6 +271,13 @@ $$ LANGUAGE plpgsql IMMUTABLE;
 --   ranking_por_caballo = true  → aggregates by caballo only (CJ S1/S2, Novicios)
 --   ranking_por_caballo = false → aggregates by jinete + caballo (binomio)
 -- Categorías with entra_ranking = false are skipped entirely.
+--
+-- SCORING RULES (Reglamento Técnico Nacional 2026):
+--   Puntos se asignan POR DÍA individual (nunca combinado sábado+domingo / FDS).
+--   cds_count = días de competencia en que el binomio participó (tiene resultado).
+--   Participación incluye ELM y RET (participaron pero fueron eliminados/retirados).
+--   NSP cuenta como participación también (siguiendo lógica AGGREGATE del Excel).
+--   "X" (sin resultado registrado) = no participó = no cuenta.
 -- ============================================================
 CREATE OR REPLACE FUNCTION recalcular_ranking(
   p_categoria_id UUID,
@@ -293,57 +300,60 @@ BEGIN
 
   IF v_por_caballo THEN
     -- ── MODE: rank by HORSE only ─────────────────────────────
+    -- Agrupamos por día (concurso_dia_id), nunca por fin de semana completo.
+    -- Incluimos todos los estados para que ELM/RET/NSP cuenten como día participado
+    -- (puntos_asignados = 0 en esos casos, no afecta la suma).
     FOR r IN
       SELECT
         res.caballo_id,
-        c.id AS concurso_id,
-        SUM(res.puntos_asignados) AS puntos_cds
+        cd.id AS dia_id,
+        SUM(res.puntos_asignados) AS puntos_dia
       FROM resultados res
       JOIN pruebas pr ON pr.id = res.prueba_id
       JOIN concurso_dias cd ON cd.id = pr.concurso_dia_id
       JOIN concursos c ON c.id = cd.concurso_id
       WHERE pr.categoria_id = p_categoria_id
         AND c.temporada = p_temporada
-        AND res.estado_resultado = 'completed'
-      GROUP BY res.caballo_id, c.id
+      GROUP BY res.caballo_id, cd.id
     LOOP
       INSERT INTO ranking (jinete_id, caballo_id, categoria_id, temporada, puntos_por_cds, cds_count, puntos_total, updated_at)
       VALUES (NULL, r.caballo_id, p_categoria_id, p_temporada,
-              jsonb_build_object(r.concurso_id::TEXT, r.puntos_cds),
-              1, r.puntos_cds, NOW())
+              jsonb_build_object(r.dia_id::TEXT, r.puntos_dia),
+              1, r.puntos_dia, NOW())
       ON CONFLICT (jinete_id, caballo_id, categoria_id, temporada) DO UPDATE
-        SET puntos_por_cds = ranking.puntos_por_cds || jsonb_build_object(r.concurso_id::TEXT, r.puntos_cds),
+        SET puntos_por_cds = ranking.puntos_por_cds || jsonb_build_object(r.dia_id::TEXT, r.puntos_dia),
             updated_at = NOW();
     END LOOP;
 
   ELSE
     -- ── MODE: rank by BINOMIO (jinete + caballo) ─────────────
+    -- Ídem: un registro por día, no por fin de semana.
     FOR r IN
       SELECT
         res.jinete_id,
         res.caballo_id,
-        c.id AS concurso_id,
-        SUM(res.puntos_asignados) AS puntos_cds
+        cd.id AS dia_id,
+        SUM(res.puntos_asignados) AS puntos_dia
       FROM resultados res
       JOIN pruebas pr ON pr.id = res.prueba_id
       JOIN concurso_dias cd ON cd.id = pr.concurso_dia_id
       JOIN concursos c ON c.id = cd.concurso_id
       WHERE pr.categoria_id = p_categoria_id
         AND c.temporada = p_temporada
-        AND res.estado_resultado = 'completed'
-      GROUP BY res.jinete_id, res.caballo_id, c.id
+      GROUP BY res.jinete_id, res.caballo_id, cd.id
     LOOP
       INSERT INTO ranking (jinete_id, caballo_id, categoria_id, temporada, puntos_por_cds, cds_count, puntos_total, updated_at)
       VALUES (r.jinete_id, r.caballo_id, p_categoria_id, p_temporada,
-              jsonb_build_object(r.concurso_id::TEXT, r.puntos_cds),
-              1, r.puntos_cds, NOW())
+              jsonb_build_object(r.dia_id::TEXT, r.puntos_dia),
+              1, r.puntos_dia, NOW())
       ON CONFLICT (jinete_id, caballo_id, categoria_id, temporada) DO UPDATE
-        SET puntos_por_cds = ranking.puntos_por_cds || jsonb_build_object(r.concurso_id::TEXT, r.puntos_cds),
+        SET puntos_por_cds = ranking.puntos_por_cds || jsonb_build_object(r.dia_id::TEXT, r.puntos_dia),
             updated_at = NOW();
     END LOOP;
   END IF;
 
   -- Recalculate totals
+  -- puntos_por_cds keys = concurso_dia IDs → COUNT(*) = días participados
   UPDATE ranking r
   SET
     puntos_total = (SELECT SUM(value::INTEGER) FROM jsonb_each_text(r.puntos_por_cds)),
@@ -351,7 +361,7 @@ BEGIN
     updated_at   = NOW()
   WHERE r.categoria_id = p_categoria_id AND r.temporada = p_temporada;
 
-  -- Assign positions (tiebreak: fewer CDS = better)
+  -- Assign positions (tiebreak: fewer days participated = better, menor participación por exceso)
   WITH ranked AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY puntos_total DESC, cds_count ASC) AS pos
     FROM ranking

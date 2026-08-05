@@ -3,3 +3,6 @@ node_modules/
 .env.local
 *.log
 .DS_Store
+
+# Cache local del CLI de Supabase (project-ref, versiones, pooler url)
+supabase/.temp/

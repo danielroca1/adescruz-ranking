@@ -1,93 +1,60 @@
 -- ════════════════════════════════════════════════════════
--- 004 — Cerrar el acceso anónimo de escritura a NOTICIAS
+-- 004 — ANULADA. NO APLICAR.
 -- ════════════════════════════════════════════════════════
 --
--- PROBLEMA
--- El setup original (sql/setup/noticias_setup.sql) creó estas políticas:
+-- Esta migración fue escrita el 2026-08-05 para cerrar un supuesto acceso
+-- anónimo de escritura a `noticias`. Se verificó contra la base viva el
+-- 2026-08-10 y ESE AGUJERO NO EXISTE. El SQL fue removido a propósito:
+-- el archivo queda solo como registro. Correrlo hoy no hace nada.
 --
---   CREATE POLICY "Anon full access noticias" ON noticias
---     FOR ALL USING (true) WITH CHECK (true);          -- ← escritura para anon
---   CREATE POLICY "Anon upload noticias fotos"  ...     -- ← subida para anon
---   CREATE POLICY "Anon delete noticias fotos"  ...     -- ← borrado para anon
+-- ─── POR QUÉ ESTABA MAL ──────────────────────────────────
+-- Se escribió leyendo `sql/setup/noticias_setup.sql` (el archivo de setup del
+-- repo) en lugar de consultar `pg_policies` en la base real. El archivo de
+-- setup estaba desactualizado: describía las políticas originales
+-- ("Anon full access noticias", etc.), que en la base ya habían sido
+-- reemplazadas por políticas con gate de admin. Ninguna de las tres políticas
+-- que esta migración pretendía borrar existe.
 --
--- El comentario decía "compatible con admin sin auth real". Hoy el admin SÍ
--- tiene auth real: admin.html manda 'Authorization: Bearer session.access_token'
--- en todas las llamadas a /rest/v1/noticias y usa el mismo cliente (con sesión)
--- para subir a storage. Verificado el 2026-08-05.
+-- ─── POR QUÉ APLICARLA HABRÍA SIDO PEOR ──────────────────
+-- Creaba `Authenticated manage noticias` con:
+--     FOR ALL TO authenticated USING (true) WITH CHECK (true)
+-- Las políticas RLS se combinan con OR: esa política NO habría reemplazado a
+-- las de admin, se habría apilado encima. Resultado: cualquier usuario
+-- logueado — incluido un jinete con cuenta de afiliado — habría podido crear,
+-- editar y borrar noticias. Lo mismo en storage con las políticas de fotos.
+-- La migración habría ABIERTO un permiso, no cerrado uno.
 --
--- Con la política vieja viva, cualquiera con la publishable key —que está en el
--- HTML de todas las páginas, como corresponde— puede crear, editar y borrar
--- noticias y borrar fotos del bucket. El login del admin frena la interfaz,
--- no la base.
+-- ─── ESTADO REAL VERIFICADO (2026-08-10) ─────────────────
+-- Tabla `noticias` — 5 políticas, todas correctas:
+--   Public read published noticias  SELECT  USING (estado = 'publicado')
+--   admins ven todas las noticias   SELECT  USING (get_my_rol() = ANY (ARRAY['superadmin','admin']))
+--   admins crean noticias           INSERT  WITH CHECK (get_my_rol() = ANY (...))
+--   admins editan noticias          UPDATE  USING (get_my_rol() = ANY (...))
+--   admins borran noticias          DELETE  USING (get_my_rol() = ANY (...))
 --
--- QUÉ HACE ESTA MIGRACIÓN
--- Reemplaza el rol `anon` por `authenticated` en las tres políticas de
--- escritura. La LECTURA PÚBLICA NO SE TOCA: el sitio sigue mostrando las
--- noticias publicadas y las fotos sin login.
+-- Figuran con rol `{public}`, que NO significa "abierto": la policy aplica a
+-- todos los roles y quien decide es la condición interna, que exige admin.
 --
--- CÓMO SE APLICA
--- Supabase → SQL Editor → pegar y ejecutar. Es idempotente: se puede correr
--- más de una vez sin efecto adicional.
--- ════════════════════════════════════════════════════════
-
-BEGIN;
-
--- ─── Tabla noticias ─────────────────────────────────────
--- Fuera la política permisiva
-DROP POLICY IF EXISTS "Anon full access noticias" ON noticias;
-
--- Escritura solo con sesión iniciada
-DROP POLICY IF EXISTS "Authenticated manage noticias" ON noticias;
-CREATE POLICY "Authenticated manage noticias" ON noticias
-  FOR ALL TO authenticated
-  USING (true) WITH CHECK (true);
-
--- Lectura pública de publicadas — se recrea igual, por si no existiera
-DROP POLICY IF EXISTS "Public read published noticias" ON noticias;
-CREATE POLICY "Public read published noticias" ON noticias
-  FOR SELECT USING (estado = 'publicado');
-
--- ─── Storage: bucket noticias-fotos ─────────────────────
-DROP POLICY IF EXISTS "Anon upload noticias fotos" ON storage.objects;
-DROP POLICY IF EXISTS "Anon delete noticias fotos" ON storage.objects;
-
-DROP POLICY IF EXISTS "Authenticated upload noticias fotos" ON storage.objects;
-CREATE POLICY "Authenticated upload noticias fotos" ON storage.objects
-  FOR INSERT TO authenticated
-  WITH CHECK (bucket_id = 'noticias-fotos');
-
--- El admin sube con { upsert: true } → un reemplazo hace UPDATE, no solo INSERT
-DROP POLICY IF EXISTS "Authenticated update noticias fotos" ON storage.objects;
-CREATE POLICY "Authenticated update noticias fotos" ON storage.objects
-  FOR UPDATE TO authenticated
-  USING (bucket_id = 'noticias-fotos')
-  WITH CHECK (bucket_id = 'noticias-fotos');
-
-DROP POLICY IF EXISTS "Authenticated delete noticias fotos" ON storage.objects;
-CREATE POLICY "Authenticated delete noticias fotos" ON storage.objects
-  FOR DELETE TO authenticated
-  USING (bucket_id = 'noticias-fotos');
-
--- Lectura pública de las fotos — no se toca, se recrea por las dudas
-DROP POLICY IF EXISTS "Public read noticias fotos" ON storage.objects;
-CREATE POLICY "Public read noticias fotos" ON storage.objects
-  FOR SELECT USING (bucket_id = 'noticias-fotos');
-
-COMMIT;
-
--- ════════════════════════════════════════════════════════
--- VERIFICACIÓN — correr después; ninguna fila debe decir {anon}
--- ════════════════════════════════════════════════════════
--- SELECT policyname, roles, cmd
---   FROM pg_policies
---  WHERE tablename = 'noticias'
---     OR (schemaname = 'storage' AND policyname ILIKE '%noticias fotos%')
---  ORDER BY tablename, policyname;
+-- Storage, bucket `noticias-fotos` (public = true):
+--   Admins upload noticias fotos    INSERT  WITH CHECK (bucket_id = 'noticias-fotos'
+--                                           AND get_my_rol() = ANY (ARRAY['superadmin','admin']))
 --
--- Prueba funcional, en este orden:
---   1. Abrir adescruz.com/noticias sin login → la noticia publicada se ve. ✅
---   2. Entrar al admin, crear una noticia de prueba, subirle una foto,
---      editarla y borrarla → todo debe funcionar igual que antes. ✅
---   3. Si el paso 2 falla con 401/403, el admin no está mandando el token:
---      revisar admin.html y NO revertir esta migración a ciegas.
+-- No hay policy SELECT y no hace falta: el bucket es público y se sirve por
+-- CDN, sin pasar por RLS. Tampoco hay policy de UPDATE ni de DELETE, y hoy
+-- ninguna de las dos ausencias rompe nada: `uploadFotoToStorage()` genera el
+-- nombre con Date.now() + random, así que el `upsert:true` nunca llega a
+-- hacer UPDATE, y el admin nunca borra fotos de este bucket
+-- (`removeGaleriaFoto()` solo las saca del array en memoria). El efecto real
+-- es que quedan archivos huérfanos en el bucket — prolijidad, no seguridad.
+--
+-- ─── LA REGLA QUE SALE DE ACÁ ────────────────────────────
+-- Antes de escribir cualquier migración de RLS, leer las políticas VIVAS:
+--
+--   SELECT schemaname, tablename, policyname, cmd, roles, qual, with_check
+--     FROM pg_policies
+--    WHERE tablename = '<tabla>'
+--    ORDER BY schemaname, tablename, policyname;
+--
+-- Los archivos de setup del repo son historia, no estado. Y `roles` por sí
+-- solo no dice si una policy es permisiva: hay que leer `qual`/`with_check`.
 -- ════════════════════════════════════════════════════════

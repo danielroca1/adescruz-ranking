@@ -205,44 +205,69 @@ function validar(
   glosaEsperada: string | null,
   cierreFecha: Date | null,
 ): { estado: string; motivo: string|null } {
-  const errors: string[] = [];
+  // ── DOS BALDES, NO UNO ────────────────────────────────────────────────────
+  // La línea de corte es una sola pregunta: ¿el dinero llegó a la cuenta de
+  // ADESCRUZ?
+  //
+  //   duros   → NO llegó (o el comprobante no es de un pago a nosotros).
+  //             No hay nada que un humano pueda rescatar: se rechaza solo.
+  //   blandos → SÍ llegó, pero algo no cuadra (monto, glosa, fecha, moneda).
+  //             La plata ya está transferida: decide una persona, no el robot.
+  //
+  // Por qué: el 18-ago-2026 la PRIMERA inscripción real de la historia se
+  // auto-rechazó por monto bajo + glosa mal escrita. El jinete había pagado de
+  // verdad; solo puso "Fharid concurso" en el concepto y le faltaban Bs 50.
+  // Rechazarlo solo, sin que nadie mire, es el peor primer contacto posible con
+  // el sistema — y además le sacaba a ADESCRUZ la chance de cobrar la
+  // diferencia o aplicar la tarifa de último momento.
+  //
+  // Ojo: nada de esto vuelve más permisiva la APROBACIÓN automática. Solo
+  // mueve casos de "rechazada" a "revision_manual". Un blando nunca aprueba.
+  const duros: string[] = [];
+  const blandos: string[] = [];
 
-  // Cuenta destino
+  // Cuenta destino — si no es la nuestra, el dinero no llegó acá.
   if (!extracted.cuenta_destino || String(extracted.cuenta_destino).replace(/\s/g,'') !== VALIDACION.cuenta_destino) {
-    errors.push(`Cuenta destino: esperada ${VALIDACION.cuenta_destino}, leyó "${extracted.cuenta_destino || '—'}"`);
+    duros.push(`Cuenta destino: esperada ${VALIDACION.cuenta_destino}, leyó "${extracted.cuenta_destino || '—'}"`);
   }
-  // Titular destino
+  // Titular destino — idem.
   if (!extracted.titular_destino || !VALIDACION.titular_destino_re.test(extracted.titular_destino)) {
-    errors.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"`);
+    duros.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"`);
   }
-  // Banco destino
+  // Banco destino — idem.
   if (!extracted.banco_destino || !VALIDACION.banco_destino_re.test(extracted.banco_destino)) {
-    errors.push(`Banco destino: leyó "${extracted.banco_destino || '—'}"`);
+    duros.push(`Banco destino: leyó "${extracted.banco_destino || '—'}"`);
   }
-  // Monto
+  // Monto bajo — el dinero llegó, falta plata. Regla ya escrita en el cerebro:
+  // "el monto no rechaza, marca". El código no la cumplía; ahora sí.
   const monto = Number(extracted.monto || 0);
   if (monto < expected) {
-    errors.push(`Monto bajo: pagó Bs ${monto}, esperaba Bs ${expected}`);
+    blandos.push(`Monto bajo: pagó Bs ${monto}, esperaba Bs ${expected}`);
   }
-  // Moneda
+  // Moneda — o pagó en otra moneda, o el OCR leyó mal. En los dos casos hay un
+  // pago real detrás: que lo mire alguien.
   if (extracted.moneda && extracted.moneda !== 'BOB') {
-    errors.push(`Moneda: ${extracted.moneda} (debe ser BOB)`);
+    blandos.push(`Moneda: ${extracted.moneda} (debe ser BOB)`);
   }
-  // Fecha en ventana + no posterior al cierre del CDS
+  // Fechas — un comprobante viejo o posterior al cierre sigue siendo un pago
+  // real. El reúso de comprobantes NO se defiende acá: lo corta
+  // `operaciones_consumidas` por N° de operación. Y un pago tarde puede
+  // convenir aceptarlo con la tarifa de último momento; esa es decisión de
+  // ADESCRUZ, no del validador.
   if (extracted.fecha_pago) {
     const fp = new Date(extracted.fecha_pago);
     if (isNaN(fp.getTime())) {
-      errors.push('Fecha de pago no parseable');
+      blandos.push('Fecha de pago no parseable');
     } else {
       if (fp < ventanaDesde) {
-        errors.push(`Comprobante muy viejo (fecha ${extracted.fecha_pago})`);
+        blandos.push(`Comprobante muy viejo (fecha ${extracted.fecha_pago})`);
       }
       if (cierreFecha && fp > cierreFecha) {
         const cierreLocal = cierreFecha.toLocaleString('es-BO', {
           day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
           timeZone: 'America/La_Paz',
         });
-        errors.push(`Comprobante posterior al cierre del CDS (cerró ${cierreLocal})`);
+        blandos.push(`Comprobante posterior al cierre del CDS (cerró ${cierreLocal})`);
       }
     }
   }
@@ -250,7 +275,7 @@ function validar(
   if (glosaEsperada) {
     const glosaCompro = String(extracted.glosa || '').trim();
     if (!glosaCompro) {
-      errors.push(`Glosa: el comprobante no tiene concepto (se esperaba "${glosaEsperada}")`);
+      blandos.push(`Glosa: el comprobante no tiene concepto (se esperaba "${glosaEsperada}")`);
     } else {
       // Case-insensitive, sin acentos y con LÍMITES DE PALABRA: evita que "I CDS 2026"
       // matchee dentro de "II CDS 2026" (números romanos que son prefijo de otros).
@@ -258,7 +283,7 @@ function validar(
       const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const reGlosa = new RegExp('\\b' + esc(norm(glosaEsperada).trim()) + '\\b');
       if (!reGlosa.test(norm(glosaCompro))) {
-        errors.push(`Glosa: leyó "${glosaCompro}", esperaba que contenga "${glosaEsperada}"`);
+        blandos.push(`Glosa: leyó "${glosaCompro}", esperaba que contenga "${glosaEsperada}"`);
       }
     }
   }
@@ -267,14 +292,23 @@ function validar(
   const faltaFecha = !extracted.fecha_pago;
   const faltaNro   = !extracted.nro_operacion;
 
-  // Errores duros (cuenta/titular/banco/monto/moneda/glosa/fecha-fuera-de-rango) → rechazada,
-  // salvo que el OCR sea poco confiable, en cuyo caso lo revisa un humano.
-  if (errors.length > 0) {
-    if (confianza < 0.5) return { estado: 'revision_manual', motivo: `OCR poco confiable (${confianza}): ${errors.join('; ')}` };
-    return { estado: 'rechazada', motivo: errors.join('; ') };
+  // Duros (cuenta / titular / banco destino) → rechazada: el dinero no llegó a
+  // ADESCRUZ. Salvo que el OCR sea poco confiable, en cuyo caso lo mira un humano.
+  // Si además hay blandos, se informan todos juntos para no obligar al jinete a
+  // descubrir los problemas de a uno.
+  if (duros.length > 0) {
+    const todos = duros.concat(blandos).join('; ');
+    if (confianza < 0.5) return { estado: 'revision_manual', motivo: `OCR poco confiable (${confianza}): ${todos}` };
+    return { estado: 'rechazada', motivo: todos };
   }
 
-  // Sin errores duros, pero con datos incompletos o baja confianza → revisión manual.
+  // Sin duros pero con blandos → revisión manual. El pago existe; lo aprueba o lo
+  // rechaza una persona desde el admin. NUNCA se aprueba solo.
+  if (blandos.length > 0) {
+    return { estado: 'revision_manual', motivo: blandos.join('; ') };
+  }
+
+  // Sin errores, pero con datos incompletos o baja confianza → revisión manual.
   // No aprobamos automáticamente algo que no pudimos verificar del todo.
   const revision: string[] = [];
   if (confianza < 0.7) revision.push(`OCR poco confiable (${confianza})`);

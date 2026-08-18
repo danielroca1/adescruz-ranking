@@ -230,7 +230,7 @@ async function processCampeonato(c: Campeonato): Promise<{ ok: boolean; reason: 
   // 4) Build Excel + summary
   const excelBase64 = await generateExcel(inscripciones as Inscripcion[]);
   const dateStr = new Date().toISOString().split("T")[0];
-  const filename = `Orden_Ingreso_${concursoId}_${dateStr}.xlsx`;
+  const filename = `Lista_Inscritos_${concursoId}_${dateStr}.xlsx`;
 
   const countByCat: Record<string, number> = {};
   (inscripciones as Inscripcion[]).forEach((i) => {
@@ -243,7 +243,13 @@ async function processCampeonato(c: Campeonato): Promise<{ ok: boolean; reason: 
   const emailBody = `
 <html><body style="font-family: sans-serif; line-height: 1.6; color: #333;">
   <h2>Cierre de Inscripciones — ${c.nombre}</h2>
-  <p>Se adjunta el archivo con el orden de ingreso consolidado por categoría.</p>
+  <p>Las inscripciones de este concurso quedaron <strong>cerradas</strong>.</p>
+  <p>Se adjunta la <strong>lista de inscritos agrupada por categoría</strong>, en orden de
+     inscripción.</p>
+  <p style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px">
+     <strong>⚠️ Este archivo no es el orden de ingreso.</strong> El orden de ingreso definitivo
+     —con las pruebas armadas según el reglamento— lo genera y envía la administración de
+     ADESCRUZ por separado.</p>
   <h3>Resumen por categoría:</h3>
   <ul>${summaryHtml}</ul>
   <p><strong>Total:</strong> ${inscripciones.length} inscripciones</p>
@@ -254,7 +260,7 @@ async function processCampeonato(c: Campeonato): Promise<{ ok: boolean; reason: 
 
   const sent = await sendEmail(
     recipients,
-    `Cierre de Inscripciones — ${c.nombre} — Orden de Ingreso`,
+    `Cierre de Inscripciones — ${c.nombre} — Lista de Inscritos`,
     emailBody,
     excelBase64,
     filename,

@@ -184,11 +184,25 @@ async function processCampeonato(c: Campeonato): Promise<{ ok: boolean; reason: 
     return { ok: false, reason: `update failed: ${updErr.message}` };
   }
 
-  // 2) Fetch this CDS's inscriptions only
+  // 2) Fetch this CDS's inscriptions only.
+  //
+  // Filtro PERMISIVO, el que define [[orden-de-ingreso]]: todas menos las
+  // `rechazada`. Antes no habia filtro de estado ninguno, asi que un jinete
+  // rechazado por no pagar aparecia en el Excel que se le manda al jurado como
+  // uno mas de la lista. Encontrado el 19-ago-2026, antes del cierre del XIII.
+  //
+  // Permisivo y no estricto (solo `aprobada`) a proposito: a la hora del cierre
+  // puede haber pagos todavia en `revision_manual` o `pendiente`, y esa gente SI
+  // compite. Dejarlos afuera del orden de ingreso es peor error que incluirlos.
+  //
+  // El `estado.is.null` esta para que una fila con estado nulo no se caiga en
+  // silencio: en Postgres `NULL <> 'rechazada'` no es TRUE, asi que un `.neq`
+  // pelado la descartaria sin avisar.
   const { data: inscripciones, error: inscErr } = await supabase
     .from("inscripciones")
-    .select("id, nombre, club, equino, cat_concurso, dias, celular, created_at")
+    .select("id, nombre, club, equino, cat_concurso, dias, celular, created_at, estado")
     .eq("concurso_id", concursoId)
+    .or("estado.is.null,estado.neq.rechazada")
     .order("cat_concurso", { ascending: true })
     .order("created_at", { ascending: true });
 

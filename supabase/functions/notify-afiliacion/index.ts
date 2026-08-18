@@ -143,10 +143,10 @@ function jineteHtml(record: AfiliacionRecord, caballos: CaballoRow[], costoJinet
     <div style="padding: 32px 24px;">
       <p style="margin: 0 0 24px 0; color: #111827; font-size: 16px;">Hola <strong>${record.nombre}</strong>,</p>
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-        Recibimos tu solicitud de afiliación para la temporada <strong>${record.temporada}</strong>. Tu registro está siendo procesado.
+        Recibimos su solicitud de afiliación para la temporada <strong>${record.temporada}</strong>. Su registro está siendo procesado.
       </p>
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-        Un administrador revisará tu solicitud y comprobante dentro de los próximos días. Te notificaremos por correo electrónico una vez que tu afiliación haya sido confirmada.
+        Un administrador revisará su solicitud y comprobante dentro de los próximos días. Le notificaremos por correo electrónico una vez que su afiliación haya sido confirmada.
       </p>
       <table style="width: 100%; border-collapse: collapse; margin: 24px 0;">
         <tr>
@@ -177,10 +177,10 @@ function jineteHtml(record: AfiliacionRecord, caballos: CaballoRow[], costoJinet
       </div>
 
       <p style="margin: 24px 0 0 0; color: #6b7280; font-size: 13px; line-height: 1.5;">
-        Si no recibís futuros correos, revisá tu carpeta de spam y agregá <strong>no-reply@adescruz.com</strong> a tus contactos.
+        Si no recibe futuros correos, revise su carpeta de spam y agregue <strong>no-reply@adescruz.com</strong> a sus contactos.
       </p>
       <p style="margin: 16px 0 0 0; color: #6b7280; font-size: 13px; line-height: 1.5;">
-        Si tienes dudas o necesitas actualizar tu información, contáctanos a través del sitio web de ADESCRUZ.
+        Si tiene dudas o necesita actualizar su información, contáctenos a través del sitio web de ADESCRUZ.
       </p>
     </div>
     <div style="background: #f0f7f4; padding: 20px 24px; text-align: center; border-top: 1px solid #e5e7eb;">

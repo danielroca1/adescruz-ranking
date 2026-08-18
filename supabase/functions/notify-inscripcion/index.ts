@@ -121,11 +121,11 @@ function generateInscripcionConfirmationEmail(record: any) {
       </p>
 
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-        Recibimos tu inscripción para el <strong>CDS ${record.concurso_id}</strong>. Tu registro está siendo procesado.
+        Recibimos su inscripción para el <strong>CDS ${record.concurso_id}</strong>. Su registro está siendo procesado.
       </p>
 
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-        Un administrador verificará tu comprobante de pago dentro de los próximos días. Te notificaremos por correo electrónico una vez que tu inscripción haya sido confirmada.
+        Un administrador verificará su comprobante de pago dentro de los próximos días. Le notificaremos por correo electrónico una vez que su inscripción haya sido confirmada.
       </p>
 
       <!-- Details table -->
@@ -153,7 +153,7 @@ function generateInscripcionConfirmationEmail(record: any) {
       </table>
 
       <p style="margin: 24px 0 0 0; color: #6b7280; font-size: 13px; line-height: 1.5;">
-        Si tienes dudas o necesitas actualizar tu información, contáctanos a través del sitio web de ADESCRUZ.
+        Si tiene dudas o necesita actualizar su información, contáctenos a través del sitio web de ADESCRUZ.
       </p>
     </div>
 

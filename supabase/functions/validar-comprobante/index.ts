@@ -226,17 +226,39 @@ function validar(
   const duros: string[] = [];
   const blandos: string[] = [];
 
-  // Cuenta destino — si no es la nuestra, el dinero no llegó acá.
-  if (!extracted.cuenta_destino || String(extracted.cuenta_destino).replace(/\s/g,'') !== VALIDACION.cuenta_destino) {
+  // ── EL NÚMERO DE CUENTA MANDA; EL NOMBRE SOLO CORROBORA ───────────────────
+  // La cuenta destino es un número de 10 dígitos: robusto al OCR. Si coincide
+  // exacta, el dinero llegó a la cuenta de ADESCRUZ y no hay más que discutir.
+  //
+  // El titular y el banco son NOMBRES: frágiles al OCR, al recorte y a la
+  // resolución. Son corroboración, no identidad.
+  //
+  // Caso real (Evie Davies, 18-ago-2026): el jinete mandó la captura de un
+  // comprobante que ese banco genera en PDF. La captura salió cortada justo
+  // abajo de las letras, así que el OCR leyó "alidaz" en vez de "alipaz" —le
+  // faltaba el trazo inferior de la p— y la inscripción se auto-rechazó. El
+  // pago era correcto y Daniel tuvo que aprobarla a mano.
+  //
+  // Por eso: si la CUENTA coincide, un titular o banco raros son casi con
+  // certeza un artefacto de lectura, no un destinatario distinto → blandos,
+  // los mira una persona. Si la cuenta NO coincide (o no se pudo leer), no hay
+  // ancla y todo vuelve a ser duro.
+  const cuentaOk = !!extracted.cuenta_destino &&
+    String(extracted.cuenta_destino).replace(/\s/g, '') === VALIDACION.cuenta_destino;
+
+  if (!cuentaOk) {
     duros.push(`Cuenta destino: esperada ${VALIDACION.cuenta_destino}, leyó "${extracted.cuenta_destino || '—'}"`);
   }
-  // Titular destino — idem.
+
+  const balde = cuentaOk ? blandos : duros;   // con cuenta buena, el nombre no rechaza solo
+
   if (!extracted.titular_destino || !VALIDACION.titular_destino_re.test(extracted.titular_destino)) {
-    duros.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"`);
+    balde.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"`
+      + (cuentaOk ? ' (la cuenta destino SÍ coincide — probable error de lectura)' : ''));
   }
-  // Banco destino — idem.
   if (!extracted.banco_destino || !VALIDACION.banco_destino_re.test(extracted.banco_destino)) {
-    duros.push(`Banco destino: leyó "${extracted.banco_destino || '—'}"`);
+    balde.push(`Banco destino: leyó "${extracted.banco_destino || '—'}"`
+      + (cuentaOk ? ' (la cuenta destino SÍ coincide — probable error de lectura)' : ''));
   }
   // Monto bajo — el dinero llegó, falta plata. Regla ya escrita en el cerebro:
   // "el monto no rechaza, marca". El código no la cumplía; ahora sí.

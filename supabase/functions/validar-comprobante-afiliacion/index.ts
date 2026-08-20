@@ -248,40 +248,65 @@ function validar(
   ventanaDesde: Date,
   glosaEsperada: string | null,
 ): { estado: string; motivo: string|null } {
-  const errors: string[] = [];
+  // ── MISMO CRITERIO QUE `validar-comprobante` (inscripciones) ──────────────
+  // Espejo del cambio del 18 y 20-ago. Esta función arrastraba la clasificación
+  // vieja: UN solo balde donde todo rechaza. Dos reglas la corrigen:
+  //
+  // 1) DOS BALDES. La pregunta que decide: ¿el dinero llegó a la cuenta de
+  //    ADESCRUZ? Si NO llegó → rechazada. Si llegó pero algo no cuadra (monto,
+  //    glosa, moneda, fecha) → revision_manual: decide una persona.
+  //
+  // 2) LA CUENTA ES EL ANCLA. `cuenta_destino` es un número: robusto al OCR.
+  //    `titular` y `banco` son nombres: frágiles al recorte y la resolución.
+  //    Si la cuenta coincide, un nombre raro es casi seguro un error de
+  //    lectura, no otro destinatario. (Caso Evie Davies: una captura cortada
+  //    hizo leer "alidaz" por "alipaz" y auto-rechazó un pago correcto.)
+  //
+  // Pesa MÁS acá que en inscripciones: esto valida la campaña de cobranza de
+  // afiliaciones. Rechazarle solo a alguien a quien le pediste que pague, y
+  // que pagó, es el peor resultado posible del sistema.
+  const duros: string[] = [];
+  const blandos: string[] = [];
 
-  if (!extracted.cuenta_destino || String(extracted.cuenta_destino).replace(/\s/g,'') !== VALIDACION.cuenta_destino) {
-    errors.push(`Cuenta destino: esperada ${VALIDACION.cuenta_destino}, leyó "${extracted.cuenta_destino || '—'}"`);
+  const cuentaOk = !!extracted.cuenta_destino &&
+    String(extracted.cuenta_destino).replace(/\s/g, '') === VALIDACION.cuenta_destino;
+
+  if (!cuentaOk) {
+    duros.push(`Cuenta destino: esperada ${VALIDACION.cuenta_destino}, leyó "${extracted.cuenta_destino || '—'}"`);
   }
+
+  const balde = cuentaOk ? blandos : duros;   // con cuenta buena, el nombre no rechaza solo
+  const nota  = cuentaOk ? ' (la cuenta destino SÍ coincide — probable error de lectura)' : '';
+
   if (!extracted.titular_destino || !VALIDACION.titular_destino_re.test(extracted.titular_destino)) {
-    errors.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"`);
+    balde.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"${nota}`);
   }
   if (!extracted.banco_destino || !VALIDACION.banco_destino_re.test(extracted.banco_destino)) {
-    errors.push(`Banco destino: leyó "${extracted.banco_destino || '—'}"`);
+    balde.push(`Banco destino: leyó "${extracted.banco_destino || '—'}"${nota}`);
   }
   const monto = Number(extracted.monto || 0);
   if (monto < expected) {
-    errors.push(`Monto bajo: pagó Bs ${monto}, esperaba Bs ${expected}`);
+    blandos.push(`Monto bajo: pagó Bs ${monto}, esperaba Bs ${expected}`);
   }
   if (extracted.moneda && extracted.moneda !== 'BOB') {
-    errors.push(`Moneda: ${extracted.moneda} (debe ser BOB)`);
+    blandos.push(`Moneda: ${extracted.moneda} (debe ser BOB)`);
   }
   if (extracted.fecha_pago) {
     const fp = new Date(extracted.fecha_pago);
-    if (isNaN(fp.getTime())) errors.push('Fecha de pago no parseable');
-    else if (fp < ventanaDesde) errors.push(`Comprobante muy viejo (fecha ${extracted.fecha_pago})`);
+    if (isNaN(fp.getTime())) blandos.push('Fecha de pago no parseable');
+    else if (fp < ventanaDesde) blandos.push(`Comprobante muy viejo (fecha ${extracted.fecha_pago})`);
   }
   if (glosaEsperada) {
     const glosaCompro = String(extracted.glosa || '').trim();
     if (!glosaCompro) {
-      errors.push(`Glosa: el comprobante no tiene concepto (se esperaba "${glosaEsperada}")`);
+      blandos.push(`Glosa: el comprobante no tiene concepto (se esperaba "${glosaEsperada}")`);
     } else {
       // sin acentos + LÍMITES DE PALABRA (evita "I CDS 2026" ⊂ "II CDS 2026")
       const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
       const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const reGlosa = new RegExp('\\b' + esc(norm(glosaEsperada).trim()) + '\\b');
       if (!reGlosa.test(norm(glosaCompro))) {
-        errors.push(`Glosa: leyó "${glosaCompro}", esperaba que contenga "${glosaEsperada}"`);
+        blandos.push(`Glosa: leyó "${glosaCompro}", esperaba que contenga "${glosaEsperada}"`);
       }
     }
   }
@@ -291,13 +316,22 @@ function validar(
   const faltaNro   = !extracted.nro_operacion;
   const faltaMonto = extracted.monto == null;
 
-  // Errores duros → rechazada (salvo OCR poco confiable → revisión manual).
-  if (errors.length > 0) {
-    if (confianza < 0.5) return { estado: 'revision_manual', motivo: `OCR poco confiable (${confianza}): ${errors.join('; ')}` };
-    return { estado: 'rechazada', motivo: errors.join('; ') };
+  // Duros (la cuenta destino no es la nuestra) → rechazada: el dinero no llegó
+  // a ADESCRUZ. Si además hay blandos se informan todos juntos, para no obligar
+  // al jinete a descubrir los problemas de a uno.
+  if (duros.length > 0) {
+    const todos = duros.concat(blandos).join('; ');
+    if (confianza < 0.5) return { estado: 'revision_manual', motivo: `OCR poco confiable (${confianza}): ${todos}` };
+    return { estado: 'rechazada', motivo: todos };
   }
 
-  // Sin errores duros, pero con datos incompletos o baja confianza → revisión manual.
+  // Sin duros pero con blandos → revisión manual. El pago existe; lo resuelve
+  // una persona. NUNCA se aprueba solo.
+  if (blandos.length > 0) {
+    return { estado: 'revision_manual', motivo: blandos.join('; ') };
+  }
+
+  // Sin errores, pero con datos incompletos o baja confianza → revisión manual.
   const revision: string[] = [];
   if (confianza < 0.7) revision.push(`OCR poco confiable (${confianza})`);
   if (faltaFecha)      revision.push('no se pudo leer la fecha del comprobante');

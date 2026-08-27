@@ -20,6 +20,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.7';
 import {
   VALIDACION, corsHeaders, PROMPT_OCR,
   jsonResp, callClaudeVision, detectMediaType, bytesToBase64, parseFechaPago,
+  normalizarNroOperacion,
   validarPago,
 } from '../_shared/validacion-pagos.ts';
 
@@ -172,7 +173,10 @@ serve(async (req) => {
 
     // 8. Anti-reúso ATÓMICO (cross-table, sin race): al APROBAR, reclamar el nro_operacion en
     //    operaciones_consumidas (PK única). Si ya lo consumió OTRO comprobante → reúso → rechazada.
-    const nroOp = extracted.nro_operacion ? String(extracted.nro_operacion).trim() : null;
+    // Un N° de operación va a una PK: se descarta lo que no sea un código (ver
+    // normalizarNroOperacion). El OCR ya devolvió la glosa acá una vez, y esa
+    // reserva basura bloqueó la siguiente aprobación.
+    const nroOp = normalizarNroOperacion(extracted.nro_operacion);
     if (estado === 'aprobada' && nroOp) {
       const { error: claimErr } = await sb.from('operaciones_consumidas')
         .insert({ nro_operacion: nroOp, origen: 'afiliacion', ref_id: afiliacion_id });

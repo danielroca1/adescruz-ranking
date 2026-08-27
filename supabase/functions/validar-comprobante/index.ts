@@ -65,7 +65,20 @@ serve(async (req) => {
 
     // Idempotencia: si ya fue validada (por el navegador del jinete o por el trigger de respaldo),
     // devolver el resultado guardado sin volver a llamar a Claude. Evita doble cobro de API y doble proceso.
-    if (insc.validacion_ocr) {
+    //
+    // DOS EXCEPCIONES, las dos aprendidas del bug de `CLAUDE_API` (20 al 27-ago-2026):
+    //
+    // 1. Un `validacion_ocr` que solo tiene `error` NO es una validación: es un fallo de
+    //    infraestructura (la API caída, un secret mal puesto, el bug de las constantes).
+    //    Guardarlo acá trababa la fila para siempre — ni arreglando y redesplegando volvía a
+    //    intentar, porque el guard veía la columna llena. Un error de infra no gasta el intento.
+    //
+    // 2. Pero una fila ya APROBADA no se re-valida nunca, ni con error cacheado. Las 8
+    //    inscripciones del XIII las verificó Daniel a mano contra el comprobante; volver a
+    //    correr el OCR sobre ellas podría bajarlas a `revision_manual` o `rechazada` y
+    //    desandar una decisión humana. Una relectura suma evidencia, no vuelve a decidir.
+    const ocrFalloInfra = !!insc.validacion_ocr && !!insc.validacion_ocr.error;
+    if (insc.validacion_ocr && (!ocrFalloInfra || insc.estado === 'aprobada')) {
       return jsonResp({ ok: true, estado: insc.estado, motivo: insc.motivo_rechazo,
         monto_esperado: insc.monto_esperado, monto_pagado: insc.monto_pagado, cached: true });
     }

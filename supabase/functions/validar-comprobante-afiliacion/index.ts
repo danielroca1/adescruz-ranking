@@ -109,7 +109,13 @@ serve(async (req) => {
     if (ae || !afil) return jsonResp({ error: 'Afiliación no encontrada' }, 404);
 
     // Idempotencia: si ya fue validada (por el navegador o por el trigger de respaldo), devolver lo guardado.
-    if (afil.validacion_ocr) {
+    //
+    // Mismas dos excepciones que en `validar-comprobante` (ver el comentario largo allá):
+    // un `validacion_ocr` que solo tiene `error` es un fallo de infraestructura y no gasta el
+    // intento — si no, la fila queda trabada aunque se arregle el bug y se redespliegue —
+    // pero una fila ya APROBADA no se re-valida nunca: no se desanda una decisión humana.
+    const ocrFalloInfra = !!afil.validacion_ocr && !!afil.validacion_ocr.error;
+    if (afil.validacion_ocr && (!ocrFalloInfra || afil.estado === 'aprobada')) {
       return jsonResp({ ok: true, estado: afil.estado, motivo: afil.motivo_rechazo,
         monto_esperado: afil.monto_esperado, monto_pagado: afil.monto_pagado, cached: true });
     }

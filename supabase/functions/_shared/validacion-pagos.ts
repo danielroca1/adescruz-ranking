@@ -12,6 +12,17 @@
 // despliega solo: Supabase lo empaqueta dentro del bundle de cada función.
 // ============================================================================
 
+// El modelo de OCR y el endpoint. Vivían en `validar-comprobante/index.ts` y se
+// perdieron al mover `callClaudeVision()` acá el 20-ago-2026: la función quedó
+// usando dos identificadores que ya no existían en ningún archivo. Resultado,
+// desplegado y sin que nada avisara: `ReferenceError: CLAUDE_API is not defined`
+// en TODA validación de comprobante entre el 20 y el 27 de agosto. El `catch`
+// del llamado lo escribía como "Error OCR" y mandaba la fila a revisión manual,
+// así que el sistema no rechazó a nadie — simplemente dejó de leer comprobantes,
+// y las 8 inscripciones del XIII las verificó Daniel a mano, una por una.
+const CLAUDE_MODEL = 'claude-sonnet-4-5';   // multimodal, soporta vision
+const CLAUDE_API   = 'https://api.anthropic.com/v1/messages';
+
 export const VALIDACION = {
   cuenta_destino: '2000274154',
   titular_destino_re: /bedoya\s+alipaz\s+nicol/i,

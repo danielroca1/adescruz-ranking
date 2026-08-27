@@ -61,6 +61,9 @@ Rules:
 - DATES ARE BOLIVIAN: numeric dates are DAY/MONTH/YEAR (DD/MM/YYYY). Example: "01/06/2026" means 1 June 2026, NOT January 6. Output "fecha_pago" as ISO 8601 (YYYY-MM-DDTHH:MM:SS) with the day and month in the CORRECT positions.
 - "monto" is the AMOUNT TRANSFERRED (not balance, not commission). Look for "monto", "importe", "total", "Bs."
 - Bolivian receipts often show "operación N°" or "número de operación" or "referencia" — that's "nro_operacion".
+- "nro_operacion" IS A CODE, NEVER A DESCRIPTION. It is digits, or digits mixed with a few letters (e.g. "999546421", "1P21377223"). If the only thing near that label is descriptive text like "XIII CDS 2026", "Afiliacion ADESCRUZ 2026", "pago inscripcion" or a person's name, that text is the GLOSA — put it in "glosa" and set "nro_operacion" to null. NEVER put concept text in "nro_operacion": a wrong value there is worse than null, because the system treats it as a unique payment identifier.
+- "glosa" is the concept/reason of the transfer, labelled "glosa", "concepto", "detalle", "motivo", "referencia" or "descripción". If you see concept text anywhere on the receipt, it belongs here — do not leave "glosa" null while putting that same text in another field.
+- "cuenta_destino": COPY IT EXACTLY AS PRINTED, INCLUDING THE MASK. Many Bolivian banks partially hide it (e.g. "200****154", "•••• 4154"). Do NOT guess the hidden digits, do NOT drop the mask characters, and do NOT return only the visible digits — reproduce the string as shown. The system knows how to match a masked account.
 - For QR payments, "banco_destino" may be inferred from the recipient's account prefix or QR provider.
 - If you cannot find ANY of the fields (image is not a receipt), set "confianza": 0 and "notas": "Not a bank receipt".`;
 export function jsonResp(body: unknown, status = 200) {
@@ -117,6 +120,82 @@ export function bytesToBase64(bytes: Uint8Array): string {
   for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
+// ─── La cuenta destino, cuando el banco la tapa ─────────────────────────────
+//
+// El diseño de dos baldes se apoya en que `cuenta_destino` es "un número de 10
+// dígitos, robusto al OCR, y por eso la IDENTIDAD". El 27-ago-2026 se descubrió
+// que ese supuesto es falso para el formato que manda la mayoría: el banco
+// imprime la cuenta ENMASCARADA — "200****154" en vez de "2000274154". La
+// comparación por igualdad exacta fallaba, la cuenta caía al balde duro y el
+// pago se auto-rechazaba. Tercera vez que el criterio falla para el mismo lado.
+//
+// Cuatro veredictos, no dos, porque "no pude verificar" NO es "fue a otra
+// cuenta":
+//   exacta      — se leyó completa y coincide. Ancla firme.
+//   enmascarada — los dígitos visibles calzan con los nuestros. Ancla firme:
+//                 un impostor tendría que compartir prefijo Y sufijo Y titular.
+//   distinta    — se leyó y NO es la nuestra. Único caso donde de verdad
+//                 sabemos que el dinero no llegó → balde duro.
+//   ilegible    — no se pudo leer, o hay tan poco a la vista que no prueba
+//                 nada. NO es evidencia de que fue a otro lado → balde blando,
+//                 lo mira una persona.
+export type MatchCuenta = 'exacta' | 'enmascarada' | 'distinta' | 'ilegible';
+
+export function clasificarCuentaDestino(
+  leida: string | null | undefined,
+  esperada: string,
+): MatchCuenta {
+  if (!leida) return 'ilegible';
+  // Fuera espacios, puntos y guiones: son separadores de formato, no dígitos.
+  const norm = String(leida).replace(/[\s.\-]/g, '');
+  if (!norm) return 'ilegible';
+  if (norm === esperada) return 'exacta';
+
+  const MASCARA = /[*xX•·#]/;
+  if (!MASCARA.test(norm)) {
+    // Sin máscara: si son puros dígitos, se leyó una cuenta y no es la nuestra.
+    // Si trae cualquier otra cosa, la lectura está corrupta y no prueba nada.
+    return /^[0-9]+$/.test(norm) ? 'distinta' : 'ilegible';
+  }
+  if (!/^[0-9*xX•·#]+$/.test(norm)) return 'ilegible';
+
+  const prefijo = norm.match(/^[0-9]*/)![0];
+  const sufijo  = norm.match(/[0-9]*$/)![0];
+
+  // Con 4 dígitos o menos a la vista, calzar no significa nada: hay demasiadas
+  // cuentas que terminan igual. No alcanza para anclar, pero tampoco para
+  // rechazar → ilegible (blando).
+  if (prefijo.length + sufijo.length <= 4) return 'ilegible';
+  if (prefijo.length + sufijo.length > esperada.length) return 'ilegible';
+
+  return (esperada.startsWith(prefijo) && esperada.endsWith(sufijo))
+    ? 'enmascarada'
+    : 'distinta';   // lo visible CONTRADICE nuestra cuenta: fue a otro lado
+}
+
+// ─── El N° de operación: un código, nunca una frase ─────────────────────────
+//
+// El 27-ago-2026 el OCR devolvió `nro_operacion: "XIII CDS 2026"` — o sea, la
+// GLOSA— y el trigger de anti-reúso la reservó en `operaciones_consumidas` como
+// si fuera el identificador único del pago. Esa cadena la comparten TODOS los
+// pagos del concurso: la reserva no protegía nada y, peor, el trigger lanza
+// excepción ante el segundo choque → la siguiente aprobación quedaba BLOQUEADA.
+//
+// Se corrigió el prompt para que no confunda los campos, pero un prompt no es
+// determinístico y este valor va a una PK. Este guard sí lo es: un N° de
+// operación real es un código sin espacios y con dígitos suficientes. Lo que no
+// lo parece se descarta, y la fila cae a revisión manual por "no se pudo leer
+// el N° de operación" — que es exactamente lo que pasó.
+export function normalizarNroOperacion(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (/\s/.test(s)) return null;                    // "XIII CDS 2026" — es una frase
+  if ((s.match(/[0-9]/g) || []).length < 5) return null;  // pocos dígitos: no es un comprobante
+  if (s.length > 40) return null;                   // desbordes de lectura
+  return s;
+}
+
 export function parseFechaPago(s: string | null | undefined): string | null {
   if (!s || typeof s !== 'string') return null;
   const trimmed = s.trim();
@@ -175,7 +254,9 @@ export function parseFechaPago(s: string | null | undefined): string | null {
 //   duros   → NO llegó. No hay nada que un humano pueda rescatar: rechazada.
 //   blandos → SÍ llegó, pero algo no cuadra. Decide una persona, nunca el robot.
 //
-// LA CUENTA ES EL ANCLA. `cuenta_destino` es un número: robusto al OCR.
+// LA CUENTA ES EL ANCLA — pero un ancla que el banco a veces tapa. Se compara
+// con `clasificarCuentaDestino()`, que acepta la forma enmascarada ("200****154")
+// y solo trata como duro el caso en que se leyó una cuenta y NO es la nuestra.
 // `titular` y `banco` son nombres: frágiles al recorte y la resolución. Si la
 // cuenta coincide, un nombre raro es casi seguro un error de lectura y no otro
 // destinatario, así que baja a blando.
@@ -243,14 +324,24 @@ export function validarPago(
   // certeza un artefacto de lectura, no un destinatario distinto → blandos,
   // los mira una persona. Si la cuenta NO coincide (o no se pudo leer), no hay
   // ancla y todo vuelve a ser duro.
-  const cuentaOk = !!extracted.cuenta_destino &&
-    String(extracted.cuenta_destino).replace(/\s/g, '') === VALIDACION.cuenta_destino;
+  // 🔧 TERCERA RECALIBRACIÓN (27-ago-2026): la cuenta viene ENMASCARADA.
+  // Antes esto era una igualdad exacta, y el "200****154" que imprime el banco
+  // la hacía fallar → balde duro → pago legítimo auto-rechazado. Ahora se
+  // clasifica en cuatro, y solo "distinta" (se leyó y NO es la nuestra) rechaza.
+  const matchCuenta = clasificarCuentaDestino(extracted.cuenta_destino, VALIDACION.cuenta_destino);
+  const cuentaOk = matchCuenta === 'exacta' || matchCuenta === 'enmascarada';
 
-  if (!cuentaOk) {
-    duros.push(`Cuenta destino: esperada ${VALIDACION.cuenta_destino}, leyó "${extracted.cuenta_destino || '—'}"`);
+  if (matchCuenta === 'distinta') {
+    duros.push(`Cuenta destino: esperada ${VALIDACION.cuenta_destino}, leyó "${extracted.cuenta_destino}"`);
+  } else if (matchCuenta === 'ilegible') {
+    blandos.push(`Cuenta destino ilegible: leyó "${extracted.cuenta_destino || '—'}"`
+      + ` (no se pudo confirmar que el pago llegó a la cuenta de ADESCRUZ, pero tampoco que no)`);
   }
 
-  const balde = cuentaOk ? blandos : duros;   // con cuenta buena, el nombre no rechaza solo
+  // Con la cuenta anclada (exacta o enmascarada), un titular o banco raros son
+  // casi con certeza un artefacto de lectura → blandos. Sin ancla, tampoco
+  // rechazan solos: que no se pueda verificar no prueba que el dinero no llegó.
+  const balde = cuentaOk ? blandos : (matchCuenta === 'ilegible' ? blandos : duros);
 
   if (!extracted.titular_destino || !VALIDACION.titular_destino_re.test(extracted.titular_destino)) {
     balde.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"`

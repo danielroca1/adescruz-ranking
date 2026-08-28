@@ -97,11 +97,40 @@ serve(async (req) => {
       const num = ROMAN_TO_NUM[numeroMatch[1].toUpperCase()];
       if (num) {
         const { data: campRow } = await sb.from('campeonatos')
-          .select('glosa_esperada, cierre_fecha')
+          .select('glosa_esperada, cierre_fecha, cierre_ejecutado_en, inscripciones_abiertas')
           .eq('temporada', 2026).eq('numero', num).single();
         glosaEsperada = campRow?.glosa_esperada ?? null;
-        if (campRow?.cierre_fecha) {
-          const cf = new Date(campRow.cierre_fecha);
+
+        // ── NO SE PUEDE LLEGAR TARDE A UN PLAZO QUE NO PASÓ ──────────────
+        //
+        // Antes esto comparaba contra `cierre_fecha` a secas, que es la hora
+        // AGENDADA del cierre, no el cierre real. Con las inscripciones
+        // abiertas y una fecha vieja, TODO pago entrante quedaba marcado como
+        // "posterior al cierre" y caía a revisión manual.
+        //
+        // Pasó de verdad: el XIII CDS se postergó por lluvia el 20-ago-2026,
+        // `cierre_activo` se apagó a mano y las fechas nunca se movieron. El
+        // 27-ago las inscripciones seguían abiertas contra un cierre agendado
+        // para el 21 — seis días antes. La primera inscripción que entró con
+        // el OCR ya arreglado (pago impecable: cuenta, glosa, monto y N° de
+        // operación correctos) se frenó por eso y solo por eso.
+        //
+        // REGLA: el chequeo necesita saber CUÁNDO se cerró de verdad, y eso lo
+        // dice `cierre_ejecutado_en`. `cierre_fecha` es un PLAN, y los planes
+        // cambian — este incidente es exactamente un plan que cambió. Usar el
+        // plan como si fuera un hecho es lo que rompió.
+        //
+        // Así que solo se compara si el cierre REALMENTE ocurrió y las
+        // inscripciones están cerradas. Si se cerró a mano (sin que el cron
+        // sellara `cierre_ejecutado_en`) no sabemos el momento, y adivinarlo
+        // con la hora agendada reintroduce el mismo bug.
+        //
+        // Es un chequeo BLANDO: no aplicarlo nunca aprueba de más por sí solo,
+        // solo deja de mandar a revisión manual pagos que no tienen nada malo.
+        const abiertas = campRow?.inscripciones_abiertas === true;
+        const cierreReal = campRow?.cierre_ejecutado_en ?? null;
+        if (!abiertas && cierreReal) {
+          const cf = new Date(cierreReal);
           if (!isNaN(cf.getTime())) cierreFecha = cf;
         }
       }

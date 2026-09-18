@@ -30,6 +30,20 @@ const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (c) =>
 const DIAS: Record<string, string> = { ambos: 'Sábado y domingo', sabado: 'Sábado', domingo: 'Domingo' }
 const diasTxt = (d: unknown) => DIAS[String(d ?? '').toLowerCase()] ?? String(d ?? '')
 
+// Enlace al listado público de inscritos DE ESE concurso: sin `?cds=` la página
+// muestra solo el CDS con inscripciones abiertas, y después del cierre el
+// jinete no se encontraría.
+function urlInscritos(concursoId: unknown): string {
+  const romano = String(concursoId ?? '').split('-')[0].toUpperCase()
+  const v: Record<string, number> = { I: 1, V: 5, X: 10, L: 50 }
+  let n = 0
+  for (let i = 0; i < romano.length; i++) {
+    const a = v[romano[i]] ?? 0, b = v[romano[i + 1]] ?? 0
+    n += a < b ? -a : a
+  }
+  return n > 0 && n < 100 ? `https://adescruz.com/inscritos?cds=${n}` : 'https://adescruz.com/inscritos'
+}
+
 function bytesABase64(bytes: Uint8Array): string {
   let bin = ''
   for (let i = 0; i < bytes.length; i += 0x8000) {
@@ -174,7 +188,8 @@ function generateInscripcionConfirmationEmail(record: any, conAdjunto = false) {
       </p>
 
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-        Un administrador verificará su comprobante de pago dentro de los próximos días. Le notificaremos por correo electrónico una vez que su inscripción haya sido confirmada.
+        Un administrador verificará su comprobante de pago. Una vez confirmado, su inscripción aparecerá en el listado de inscritos del concurso:
+        <a href="${urlInscritos(record.concurso_id)}" style="color: #1a4731; font-weight: 600;">adescruz.com/inscritos</a>
       </p>
 
       <!-- Details table -->

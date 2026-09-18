@@ -1,4 +1,5 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.7'
 
 interface InscripcionPayload {
   record: {
@@ -21,6 +22,46 @@ interface InscripcionPayload {
 const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')
 const ADMIN_EMAIL = 'daniel.roca.s@gmail.com'
 
+// Todo lo que va al HTML lo escribió el jinete en el formulario público: se
+// escapa. Sin esto, un nombre con <a href=…> llegaba como enlace a un correo
+// enviado desde no-reply@adescruz.com.
+const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string))
+const DIAS: Record<string, string> = { ambos: 'Sábado y domingo', sabado: 'Sábado', domingo: 'Domingo' }
+const diasTxt = (d: unknown) => DIAS[String(d ?? '').toLowerCase()] ?? String(d ?? '')
+
+function bytesABase64(bytes: Uint8Array): string {
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  }
+  return btoa(bin)
+}
+
+// ── El comprobante, adjunto a los dos correos ────────────────────────────────
+// Pedido de Daniel (18-sep-2026). El formulario sube el archivo ANTES de crear
+// la inscripción, así que `comprobante_url` ya viene en el payload del webhook.
+// Si no se puede bajar, el correo sale igual sin adjunto: un adjunto nunca
+// frena el aviso de que alguien se inscribió.
+async function adjuntoComprobante(record: any): Promise<{ filename: string; content: string } | null> {
+  const ruta = record?.comprobante_url
+  if (!ruta) return null
+  try {
+    const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+    const { data, error } = await sb.storage.from('comprobantes').download(ruta)
+    if (error || !data) { console.error('No se pudo bajar el comprobante', ruta, error?.message); return null }
+    const bytes = new Uint8Array(await data.arrayBuffer())
+    if (bytes.length > 10 * 1024 * 1024) return null
+    const ext = (String(ruta).split('.').pop() || 'jpg').toLowerCase()
+    const quien = String(record.nombre || 'jinete').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')
+    return { filename: `Comprobante_${quien}_${record.concurso_id || 'CDS'}.${ext}`, content: bytesABase64(bytes) }
+  } catch (e) {
+    console.error('Error adjuntando el comprobante:', e)
+    return null
+  }
+}
+
 serve(async (req) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 })
@@ -34,12 +75,16 @@ serve(async (req) => {
       return new Response('Invalid payload', { status: 400 })
     }
 
+    const adjunto = await adjuntoComprobante(record)
+    const attachments = adjunto ? [adjunto] : undefined
+
     // Email 1: To jinete — confirmation receipt
     // NOTE: inscripciones table must have email field — celular is phone only
     const emailToJinete = await sendEmailViaResend({
       to: record.email, // FIXED: Use email field, not celular (phone number)
       subject: `Inscripción recibida — CDS ${record.concurso_id}`,
-      html: generateInscripcionConfirmationEmail(record),
+      html: generateInscripcionConfirmationEmail(record, !!adjunto),
+      attachments,
     })
 
     if (!emailToJinete) {
@@ -50,7 +95,8 @@ serve(async (req) => {
     const emailToAdmin = await sendEmailViaResend({
       to: ADMIN_EMAIL,
       subject: `[ADMIN] Nueva inscripción — ${record.nombre} (${record.concurso_id})`,
-      html: generateInscripcionAdminNotificationEmail(record),
+      html: generateInscripcionAdminNotificationEmail(record, !!adjunto),
+      attachments,
     })
 
     if (!emailToAdmin) {
@@ -74,10 +120,12 @@ async function sendEmailViaResend({
   to,
   subject,
   html,
+  attachments,
 }: {
   to: string
   subject: string
   html: string
+  attachments?: Array<{ filename: string; content: string }>
 }) {
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -90,13 +138,14 @@ async function sendEmailViaResend({
       to,
       subject,
       html,
+      ...(attachments ? { attachments } : {}),
     }),
   })
-
+  if (!response.ok) console.error('Resend', response.status, await response.text())
   return response.ok
 }
 
-function generateInscripcionConfirmationEmail(record: any) {
+function generateInscripcionConfirmationEmail(record: any, conAdjunto = false) {
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -117,7 +166,7 @@ function generateInscripcionConfirmationEmail(record: any) {
     <!-- Content -->
     <div style="padding: 32px 24px;">
       <p style="margin: 0 0 24px 0; color: #111827; font-size: 16px;">
-        Hola <strong>${record.nombre}</strong>,
+        Hola <strong>${esc(record.nombre)}</strong>,
       </p>
 
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
@@ -132,24 +181,32 @@ function generateInscripcionConfirmationEmail(record: any) {
       <table style="width: 100%; border-collapse: collapse; margin: 24px 0;">
         <tr>
           <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px; font-weight: 600;">Jinete:</td>
-          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${record.nombre}</td>
+          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${esc(record.nombre)}</td>
         </tr>
         <tr>
           <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px; font-weight: 600;">Club:</td>
-          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${record.club}</td>
+          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${esc(record.club)}</td>
         </tr>
         <tr>
           <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px; font-weight: 600;">Equino:</td>
-          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${record.equino}</td>
+          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${esc(record.equino)}</td>
         </tr>
         <tr>
-          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px; font-weight: 600;">Categoría:</td>
-          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${record.cat_concurso}</td>
+          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px; font-weight: 600;">Categoría inscrita:</td>
+          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${esc(record.cat_concurso)}</td>
         </tr>
         <tr>
-          <td style="padding: 10px 0; color: #6b7280; font-size: 13px; font-weight: 600;">Participación:</td>
-          <td style="padding: 10px 0; color: #1a4731; font-size: 14px; text-align: right; font-weight: 600;">${record.dias}</td>
+          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #6b7280; font-size: 13px; font-weight: 600;">Categoría oficial:</td>
+          <td style="padding: 10px 0; border-bottom: 1px solid #e5e7eb; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">${esc(record.cat_oficial)}</td>
         </tr>
+        <tr>
+          <td style="padding: 10px 0; ${conAdjunto ? 'border-bottom: 1px solid #e5e7eb; ' : ''}color: #6b7280; font-size: 13px; font-weight: 600;">Días:</td>
+          <td style="padding: 10px 0; ${conAdjunto ? 'border-bottom: 1px solid #e5e7eb; ' : ''}color: #1a4731; font-size: 14px; text-align: right; font-weight: 600;">${esc(diasTxt(record.dias))}</td>
+        </tr>${conAdjunto ? `
+        <tr>
+          <td style="padding: 10px 0; color: #6b7280; font-size: 13px; font-weight: 600;">Comprobante:</td>
+          <td style="padding: 10px 0; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">📎 Adjunto a este correo</td>
+        </tr>` : ''}
       </table>
 
       <p style="margin: 24px 0 0 0; color: #6b7280; font-size: 13px; line-height: 1.5;">
@@ -170,7 +227,7 @@ function generateInscripcionConfirmationEmail(record: any) {
 </html>`
 }
 
-function generateInscripcionAdminNotificationEmail(record: any) {
+function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = false) {
   const estadoColor = record.estado === 'pendiente' ? '#f59e0b' : '#10b981'
   return `<!DOCTYPE html>
 <html lang="es">
@@ -192,7 +249,7 @@ function generateInscripcionAdminNotificationEmail(record: any) {
     <!-- Content -->
     <div style="padding: 32px 24px;">
       <p style="margin: 0 0 24px 0; color: #111827; font-size: 14px;">
-        <strong>Nueva inscripción recibida</strong> — CDS ${record.concurso_id}
+        <strong>Nueva inscripción recibida</strong> — CDS ${esc(record.concurso_id)}
       </p>
 
       <!-- Details table -->
@@ -203,39 +260,39 @@ function generateInscripcionAdminNotificationEmail(record: any) {
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">ID Registro:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb; font-family: monospace;">${record.id}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb; font-family: monospace;">${esc(record.id)}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Nombre:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb; font-weight: 600;">${record.nombre}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb; font-weight: 600;">${esc(record.nombre)}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Celular:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${record.celular}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${esc(record.celular)}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Categoría oficial:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${record.cat_oficial}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${esc(record.cat_oficial)}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Club:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${record.club}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${esc(record.club)}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Equino:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb; font-weight: 600;">${record.equino}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb; font-weight: 600;">${esc(record.equino)}</td>
         </tr>
         <tr>
-          <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Categoría CDS:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${record.cat_concurso}</td>
+          <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Categoría inscrita:</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${esc(record.cat_concurso)}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Días:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${record.dias}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${esc(diasTxt(record.dias))}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Comprobante:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${record.comprobante_url ? '✅ Adjunto' : '❌ No adjunto'}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${conAdjunto ? '📎 Adjunto a este correo' : record.comprobante_url ? '⚠️ No se pudo adjuntar: verlo en el admin' : '❌ No subió comprobante'}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Estado:</td>

@@ -183,9 +183,13 @@ serve(async (req) => {
       if (claimErr) {
         if (claimErr.code === '23505') {
           const { data: ex } = await sb.from('operaciones_consumidas').select('ref_id').eq('nro_operacion', nroOp).single();
+          // 18-sep-2026: el reúso tampoco rechaza solo (decisión de Daniel: el
+          // robot no rechaza nunca). Va a revisión con el motivo marcado; el
+          // trigger `consumir_operacion_al_aprobar` sigue impidiendo aprobarlo
+          // a mano sin mirar, porque choca contra la reserva existente.
           if (!ex || ex.ref_id !== afiliacion_id) {
-            estado = 'rechazada';
-            motivo = `N° de operación ${nroOp} ya fue usado en otro comprobante (reúso)` + (motivo ? '; ' + motivo : '');
+            estado = 'revision_manual';
+            motivo = `⚠️ Posible comprobante repetido: el N° de operación ${nroOp} ya fue usado en otro comprobante` + (motivo ? '; ' + motivo : '');
           }
         } else {
           console.error('operaciones_consumidas claim error (afiliacion):', claimErr);

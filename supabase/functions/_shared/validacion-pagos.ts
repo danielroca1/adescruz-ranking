@@ -186,6 +186,12 @@ export function clasificarCuentaDestino(
 // operación real es un código sin espacios y con dígitos suficientes. Lo que no
 // lo parece se descarta, y la fila cae a revisión manual por "no se pudo leer
 // el N° de operación" — que es exactamente lo que pasó.
+//
+// 🔧 18-sep-2026: tampoco puede ser NUESTRA cuenta. El comprobante del BNB trae
+// un campo "Comprobante: …*BNB*2000274154*17/09/2026" y el OCR sacó de ahí la
+// cuenta de ADESCRUZ como N° de operación. Se reservó al aprobar y quedó como
+// una mina: todo comprobante del BNB lleva esa cuenta adentro, así que el
+// siguiente que la leyera igual chocaba como "comprobante repetido".
 export function normalizarNroOperacion(v: unknown): string | null {
   if (v === null || v === undefined) return null;
   const s = String(v).trim();
@@ -193,6 +199,7 @@ export function normalizarNroOperacion(v: unknown): string | null {
   if (/\s/.test(s)) return null;                    // "XIII CDS 2026" — es una frase
   if ((s.match(/[0-9]/g) || []).length < 5) return null;  // pocos dígitos: no es un comprobante
   if (s.length > 40) return null;                   // desbordes de lectura
+  if (s.replace(/[^0-9]/g, '') === VALIDACION.cuenta_destino) return null;  // es la cuenta de ADESCRUZ
   return s;
 }
 
@@ -253,6 +260,9 @@ export function parseFechaPago(s: string | null | undefined): string | null {
 //
 //   duros   → NO llegó. No hay nada que un humano pueda rescatar: rechazada.
 //   blandos → SÍ llegó, pero algo no cuadra. Decide una persona, nunca el robot.
+//
+// 🔧 Desde el 18-sep-2026 los duros TAMPOCO rechazan: van a revisión manual con
+// el motivo marcado "⚠️ Posible pago a otra cuenta". Ver el final de la función.
 //
 // LA CUENTA ES EL ANCLA — pero un ancla que el banco a veces tapa. Se compara
 // con `clasificarCuentaDestino()`, que acepta la forma enmascarada ("200****154")
@@ -403,16 +413,29 @@ export function validarPago(
 
   const confianza = Number(extracted.confianza || 0);
   const faltaFecha = !extracted.fecha_pago;
-  const faltaNro   = !extracted.nro_operacion;
+  // Se mira el N° YA NORMALIZADO, no el crudo: si el guard lo descartó (la
+  // glosa, nuestra cuenta, un desborde), no hay con qué chequear el reúso y
+  // aprobarlo igual dejaba el comprobante sin protección (caso Naia Majluf,
+  // 17-sep: el mismo archivo aprobado dos veces).
+  const faltaNro   = !normalizarNroOperacion(extracted.nro_operacion);
 
-  // Duros (cuenta / titular / banco destino) → rechazada: el dinero no llegó a
-  // ADESCRUZ. Salvo que el OCR sea poco confiable, en cuyo caso lo mira un humano.
-  // Si además hay blandos, se informan todos juntos para no obligar al jinete a
-  // descubrir los problemas de a uno.
+  // Duros (cuenta / titular / banco destino que contradicen los nuestros) →
+  // TAMBIÉN revisión manual. El robot ya no rechaza nunca.
+  //
+  // 🔧 CUARTA RECALIBRACIÓN (18-sep-2026), decisión de Daniel: «que todos vayan
+  // a revisión manual y les salga a ellos en revisión». La auditoría de los 60
+  // comprobantes reales del XIII y el XIV mostró que CADA rechazo automático
+  // del balde duro fue un pago correcto mal leído: el CI/NIT del titular tomado
+  // como cuenta (Mercantil, 3 veces), origen y destino invertidos (BCP). El
+  // rechazo asustaba a gente que había pagado bien, y ningún caso real de pago
+  // a otra cuenta lo compensó.
+  //
+  // El balde duro se conserva como CLASIFICACIÓN: el motivo sale marcado para
+  // que el admin lo mire primero, pero el estado es el mismo que un blando.
   if (duros.length > 0) {
     const todos = duros.concat(blandos).join('; ');
-    if (confianza < 0.5) return { estado: 'revision_manual', motivo: `OCR poco confiable (${confianza}): ${todos}` };
-    return { estado: 'rechazada', motivo: todos };
+    const conf = confianza < 0.5 ? ` (OCR poco confiable: ${confianza})` : '';
+    return { estado: 'revision_manual', motivo: `⚠️ Posible pago a otra cuenta${conf}: ${todos}` };
   }
 
   // Sin duros pero con blandos → revisión manual. El pago existe; lo aprueba o lo

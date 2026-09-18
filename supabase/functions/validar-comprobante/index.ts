@@ -31,15 +31,32 @@ const TARIFAS_FALLBACK: Tarifas = {
   fc_ambos: 200, general_ambos: 250, segunda_pasada_dia: 50, ultimo_momento: 500, descuento_un_dia: 0.5,
 };
 
+// Los días que cubre una inscripción: 'ambos' → los dos.
+function diasDe(dias: unknown): string[] {
+  const d = String(dias ?? '').toLowerCase();
+  if (d.includes('amb')) return ['sabado', 'domingo'];
+  const out: string[] = [];
+  if (d.includes('sab') || d.includes('sáb')) out.push('sabado');
+  if (d.includes('dom')) out.push('domingo');
+  return out.length ? out : ['?'];
+}
+
+// Se cobra POR DÍA y POR BINOMIO: la primera pasada del binomio cada día paga la
+// tarifa plena del día; cada pasada adicional del MISMO binomio el MISMO día,
+// Bs 50. Daniel (18-sep-2026): «la regla debería ser en el mismo día, mismo
+// binomio en otra categoría». Antes cualquier segunda inscripción del binomio en
+// el CDS era 2da pasada aunque fuera otro día (Hermes Lara: sábado ABIERTA 4ta,
+// domingo ABIERTA 5ta → el domingo esperaba 50 en vez de 125). Misma lógica que
+// `calcularMontoEsperado` del admin.
 function calcularMontoEsperado(
-  catConcurso: string, dias: string, esSegundaPasada: boolean, esUltimoMomento: boolean, t: Tarifas,
+  catConcurso: string, dias: string, diasPrevios: string[], esUltimoMomento: boolean, t: Tarifas,
 ): number {
-  const esAmbos = String(dias).toLowerCase() === 'ambos';
   if (esUltimoMomento) return Number(t.ultimo_momento);
-  if (esSegundaPasada) return esAmbos ? Number(t.segunda_pasada_dia) * 2 : Number(t.segunda_pasada_dia);
   const esFC = /futur|fut\.?\s*camp|^fc\b/i.test(catConcurso || '');
   const baseAmbos = esFC ? Number(t.fc_ambos) : Number(t.general_ambos);
-  return esAmbos ? baseAmbos : Math.round(baseAmbos * Number(t.descuento_un_dia));
+  const primeraDelDia = Math.round(baseAmbos * Number(t.descuento_un_dia));
+  const previos = new Set(diasPrevios);
+  return diasDe(dias).reduce((suma, d) => suma + (previos.has(d) ? Number(t.segunda_pasada_dia) : primeraDelDia), 0);
 }
 
 // ─── Handler principal ────────────────────────────────────────
@@ -136,17 +153,18 @@ serve(async (req) => {
       }
     }
 
-    // 2. Detectar 2da pasada: mismo BINOMIO (jinete + equino) con una inscripción anterior
-    //    en el mismo CDS, SIN importar la categoría. Otro caballo = binomio nuevo = tarifa completa.
+    // 2. Días que ya cubren las inscripciones ANTERIORES del mismo binomio (jinete +
+    //    equino) en el CDS, sin importar la categoría. Las rechazadas no cuentan.
+    //    Un día ya cubierto = 2da pasada ese día (Bs 50); uno nuevo = tarifa plena.
     const { data: prev } = await sb.from('inscripciones')
-      .select('id').eq('concurso_id', insc.concurso_id).eq('nombre', insc.nombre)
-      .eq('equino', insc.equino).lt('created_at', insc.created_at).limit(1);
-    const esSegundaPasada = Boolean(prev && prev.length);
+      .select('dias, estado').eq('concurso_id', insc.concurso_id).eq('nombre', insc.nombre)
+      .eq('equino', insc.equino).lt('created_at', insc.created_at).neq('estado', 'rechazada');
+    const diasPrevios = [...new Set((prev || []).flatMap((r: any) => diasDe(r.dias)))];
 
     // 3. Cargar tarifas + calcular monto esperado
     const { data: tarifasRow } = await sb.from('tarifas_inscripcion').select('*').eq('temporada', 2026).single();
     const tarifas: Tarifas = tarifasRow ?? TARIFAS_FALLBACK;
-    const expected = calcularMontoEsperado(insc.cat_concurso, insc.dias, esSegundaPasada, false, tarifas);
+    const expected = calcularMontoEsperado(insc.cat_concurso, insc.dias, diasPrevios, false, tarifas);
 
     // 4. Bajar comprobante
     const { data: file, error: dl } = await sb.storage.from('comprobantes').download(insc.comprobante_url);

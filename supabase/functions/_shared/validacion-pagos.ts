@@ -203,14 +203,36 @@ export function normalizarNroOperacion(v: unknown): string | null {
   return s;
 }
 
+// La hora de un comprobante es la IMPRESA, en hora de Bolivia (UTC−4, sin horario
+// de verano): se pasa a UTC SUMANDO 4 horas. Antes del 21-sep-2026 el intento 0
+// hacía `new Date("2026-09-17T06:27:09")`, que a una fecha sin huso la toma en la
+// zona del SERVIDOR — la Edge Function corre en UTC —, y los intentos 1 y 2
+// RESTABAN 4 horas: fecha_pago quedaba 4 (u 8) horas antes del pago real.
+const BOLIVIA_UTC_OFFSET_H = 4;
+function horaBoliviaAIso(y: number, mes0: number, d: number, h = 0, mi = 0, s = 0): string | null {
+  if (mes0 < 0 || mes0 > 11 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59) return null;
+  const t = Date.UTC(y, mes0, d, h + BOLIVIA_UTC_OFFSET_H, mi, s);
+  return isNaN(t) ? null : new Date(t).toISOString();
+}
+
 export function parseFechaPago(s: string | null | undefined): string | null {
   if (!s || typeof s !== 'string') return null;
   const trimmed = s.trim();
 
-  // Intento 0: ISO 8601 explícito (YYYY-MM-DD...). No es ambiguo → parse directo.
-  if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
-    const iso = new Date(trimmed);
-    if (!isNaN(iso.getTime())) return iso.toISOString();
+  // Intento 0: ISO 8601 (YYYY-MM-DD[THH:MM[:SS]]). Es la hora impresa en el
+  // comprobante: sin huso, o con una «Z» que el OCR no puede saber (no ve UTC en
+  // ningún lado), se toma como hora de Bolivia. Solo un huso explícito distinto
+  // de Z (p. ej. -04:00) se respeta tal cual.
+  const mIso = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i);
+  if (mIso) {
+    const huso = mIso[7];
+    if (huso && huso.toUpperCase() !== 'Z') {
+      const iso = new Date(trimmed);
+      if (!isNaN(iso.getTime())) return iso.toISOString();
+    } else {
+      const r = horaBoliviaAIso(+mIso[1], +mIso[2] - 1, +mIso[3], +(mIso[4] || 0), +(mIso[5] || 0), +(mIso[6] || 0));
+      if (r) return r;
+    }
   }
 
   // Intento 1: formato boliviano numérico DD/MM/YYYY o DD-MM-YYYY (DÍA PRIMERO), con hora opcional.
@@ -221,10 +243,8 @@ export function parseFechaPago(s: string | null | undefined): string | null {
     if (year < 100) year += 2000;
     const hour = mNum[4] ? parseInt(mNum[4], 10) : 0;
     const min  = mNum[5] ? parseInt(mNum[5], 10) : 0;
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-      const d = new Date(Date.UTC(year, month - 1, day, hour - 4 /* Bolivia UTC-4 */, min));
-      if (!isNaN(d.getTime())) return d.toISOString();
-    }
+    const r = horaBoliviaAIso(year, month - 1, day, hour, min);
+    if (r) return r;
   }
 
   // Intento 2: español "DD de Mes, YYYY a las HH:MM" o "DD de Mes de YYYY HH:MM"
@@ -241,8 +261,8 @@ export function parseFechaPago(s: string | null | undefined): string | null {
     const hour = m[4] ? parseInt(m[4], 10) : 0;
     const min  = m[5] ? parseInt(m[5], 10) : 0;
     if (!isNaN(day) && month !== undefined && !isNaN(year)) {
-      const d = new Date(Date.UTC(year, month, day, hour - 4 /* Bolivia UTC-4 */, min));
-      if (!isNaN(d.getTime())) return d.toISOString();
+      const r = horaBoliviaAIso(year, month, day, hour, min);
+      if (r) return r;
     }
   }
 

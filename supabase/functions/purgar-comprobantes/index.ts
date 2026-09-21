@@ -6,8 +6,15 @@
 // Reglas (decididas por Daniel 2026-05-04):
 //   - inscripciones: borrar comprobante 6 meses post created_at,
 //                    si estado in ('aprobada','rechazada')
-//   - afiliaciones:  borrar comprobante 18 meses post created_at,
-//                    si estado in ('aprobada','rechazada')
+//   - afiliaciones:  borrar comprobante 18 meses post revisado_en (la
+//                    aprobación o el rechazo), si estado in ('aprobada','rechazada')
+//
+// Afiliaciones cuenta desde revisado_en y no desde created_at (Daniel,
+// 2026-09-21): la deuda 2024/2025/2026 se cargó entera el 14-ago-2026, así
+// que con created_at un pago de 2024 hecho en feb-2028 perdía la foto a los
+// pocos días de subirla. Una fila terminal sin revisado_en NO se purga (hoy
+// no hay ninguna). Inscripciones sigue en created_at: se aprueban a los pocos
+// días de creadas, así que la diferencia no importa.
 //
 // Lo que se borra: el archivo del bucket. La fila de DB queda con
 // `comprobante_purgado_en` seteado y `comprobante_url` nullado para que
@@ -28,6 +35,12 @@ const RETENTION_DAYS = {
   afiliaciones:  548,  // 18 meses (~365 + 183)
 };
 
+// Desde qué fecha corre la retención en cada tabla
+const DESDE = {
+  inscripciones: 'created_at',
+  afiliaciones:  'revisado_en',
+} as const;
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -44,7 +57,8 @@ function jsonResp(body: unknown, status = 200) {
 interface Row {
   id: string;
   comprobante_url: string;
-  created_at: string;
+  created_at?: string;
+  revisado_en?: string;
 }
 
 async function purgarTabla(
@@ -52,14 +66,16 @@ async function purgarTabla(
   tabla: 'inscripciones' | 'afiliaciones',
 ): Promise<{ tabla: string; candidates: number; deleted: number; failed: number; details: any[] }> {
   const cutoff = new Date(Date.now() - RETENTION_DAYS[tabla] * 86400000).toISOString();
+  const desde = DESDE[tabla];
 
   const { data, error } = await sb
     .from(tabla)
-    .select('id, comprobante_url, created_at')
+    .select(`id, comprobante_url, ${desde}`)
     .in('estado', TERMINAL_ESTADOS)
     .not('comprobante_url', 'is', null)
     .is('comprobante_purgado_en', null)
-    .lt('created_at', cutoff)
+    .not(desde, 'is', null)
+    .lt(desde, cutoff)
     .limit(500);  // safety cap per run
 
   if (error) {
@@ -102,7 +118,7 @@ async function purgarTabla(
     }
 
     deleted++;
-    details.push({ id: row.id, url, age_days: Math.round((Date.now() - new Date(row.created_at).getTime()) / 86400000) });
+    details.push({ id: row.id, url, age_days: Math.round((Date.now() - new Date(row[desde] as string).getTime()) / 86400000) });
   }
 
   return { tabla, candidates, deleted, failed, details };

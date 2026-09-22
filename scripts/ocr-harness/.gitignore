@@ -1,0 +1,7 @@
+# El harness no tiene dependencias; si algún día se instala algo, que no entre al repo.
+node_modules/
+# Nada de salidas ni imágenes acá: van al scratchpad (HARNESS_DIR).
+*.json
+!package.json
+!ejemplos/*.json
+*.log

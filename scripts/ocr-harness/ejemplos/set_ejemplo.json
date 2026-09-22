@@ -1,0 +1,24 @@
+{
+ "_nota": "FIXTURE FICTICIO para probar comparar.mjs sin base ni API. Nombres, N° y montos inventados. La única cuenta real es la de ADESCRUZ (pública en los QR).",
+ "generado": "2026-09-22T00:00:00.000Z",
+ "glosas": { "XIV-CDS-2026": "XIV CDS 2026" },
+ "resumen": { "filas": 4, "archivos_unicos": 4, "filas_por_concurso": { "XIV-CDS-2026": 4 } },
+ "archivos": [
+  { "archivo": "inscripciones/0000000000001_Ejemplo_Uno.jpg", "tabla_ruta": "inscripciones", "ext": "jpg", "media_type_prod": "image/jpeg",
+    "filas": [ { "tabla": "inscripciones", "id": "ej-1", "nombre": "Ejemplo Uno", "concurso_id": "XIV-CDS-2026", "temporada": null, "estado": "aprobada", "revisado_por_humano": false,
+      "created_at": "2026-09-17T20:00:00.000Z", "monto_esperado": 250, "glosa_esperada": "XIV CDS 2026", "cat_concurso": "Infantil A", "dias": "ambos", "banco_origen": "Banco Ganadero",
+      "ocr_viejo": { "extracted": { "banco_origen": "Banco Ganadero", "titular_origen": "Pagador Uno", "monto": 250, "moneda": "BOB", "fecha_pago": "2026-09-17T19:28:00.000Z", "nro_operacion": "123456789", "cuenta_destino": "2000274154", "titular_destino": "Bedoya Alipaz Nicolas", "banco_destino": "Banco Nacional de Bolivia", "glosa": "XIV CDS 2026", "confianza": 0.95 } } } ] },
+  { "archivo": "inscripciones/0000000000002_Ejemplo_Dos.jpg", "tabla_ruta": "inscripciones", "ext": "jpg", "media_type_prod": "image/jpeg",
+    "filas": [ { "tabla": "inscripciones", "id": "ej-2", "nombre": "Ejemplo Dos", "concurso_id": "XIV-CDS-2026", "temporada": null, "estado": "aprobada", "revisado_por_humano": true,
+      "created_at": "2026-09-17T21:00:00.000Z", "monto_esperado": 250, "glosa_esperada": "XIV CDS 2026", "cat_concurso": "Pre Juveniles", "dias": "ambos", "banco_origen": null,
+      "ocr_viejo": { "extracted": { "banco_origen": "BNB", "titular_origen": null, "monto": 250, "moneda": "BOB", "fecha_pago": "2026-09-17T13:41:26.000Z", "nro_operacion": "XIV CDS 2026", "cuenta_destino": "200****154", "titular_destino": "Bedoya Alipaz Nicolas", "banco_destino": null, "glosa": null, "confianza": 0.9 } } } ] },
+  { "archivo": "inscripciones/0000000000003_Ejemplo_Tres.png", "tabla_ruta": "inscripciones", "ext": "png", "media_type_prod": "image/png",
+    "filas": [ { "tabla": "inscripciones", "id": "ej-3", "nombre": "Ejemplo Tres", "concurso_id": "XIV-CDS-2026", "temporada": null, "estado": "aprobada", "revisado_por_humano": true,
+      "created_at": "2026-09-18T01:00:00.000Z", "monto_esperado": 125, "glosa_esperada": "XIV CDS 2026", "cat_concurso": "Infantil B", "dias": "sabado", "banco_origen": "BCP",
+      "ocr_viejo": null } ] },
+  { "archivo": "inscripciones/0000000000004_Ejemplo_Cuatro.jpg", "tabla_ruta": "inscripciones", "ext": "jpg", "media_type_prod": "image/jpeg",
+    "filas": [ { "tabla": "inscripciones", "id": "ej-4", "nombre": "Ejemplo Cuatro", "concurso_id": "XIV-CDS-2026", "temporada": null, "estado": "aprobada", "revisado_por_humano": false,
+      "created_at": "2026-09-18T12:30:00.000Z", "monto_esperado": 250, "glosa_esperada": "XIV CDS 2026", "cat_concurso": "Infantil C", "dias": "ambos", "banco_origen": "Mercantil",
+      "ocr_viejo": { "extracted": { "banco_origen": null, "titular_origen": "Pagador Cuatro", "monto": 250, "moneda": "BOB", "fecha_pago": "2026-09-18T12:25:10.000Z", "nro_operacion": "1003202609181719167", "cuenta_destino": "2000274154", "titular_destino": "BEDOYA ALIPAZ NICOLAS", "banco_destino": "BNB", "glosa": "XIV CDS 2026", "confianza": 0.92 } } } ] }
+ ]
+}

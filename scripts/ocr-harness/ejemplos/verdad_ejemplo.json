@@ -1,0 +1,13 @@
+{
+ "meta": { "_nota": "FIXTURE FICTICIO con el esquema de verdad_xiii_xiv.json. Caso 3: la verdad dice que el N° es del BCP con origen Pagador Tres; caso 4: el comprobante real es de Bs 200, el lector leyó 250." },
+ "entradas": [
+  { "archivo": "inscripciones/0000000000001_Ejemplo_Uno.jpg", "filas": [ { "id": "ej-1" } ],
+    "verdad": { "banco_origen": "Ganadero", "formato": "Ganadero app — Pago QR realizado", "tipo_transaccion": "QR", "monto": 250, "moneda": "BOB", "fecha_hora_impresa": "2026-09-17 19:28", "nro_operacion": "123456789", "glosa": "XIV CDS 2026", "cuenta_destino": "2000274154", "titular_destino": "BEDOYA ALIPAZ NICOLAS", "titular_origen": "Pagador Uno", "banco_destino_impreso": "Banco Nacional de Bolivia S.A.", "legible": true, "confianza": "alta", "dudas": null, "extras": {} } },
+  { "archivo": "inscripciones/0000000000002_Ejemplo_Dos.jpg", "filas": [ { "id": "ej-2" } ],
+    "verdad": { "banco_origen": "BNB", "formato": "BNB — Comprobante de transferencia a terceros simple", "tipo_transaccion": "transferencia", "monto": 250, "moneda": "BOB", "fecha_hora_impresa": "2026-09-17 17:41:26", "nro_operacion": "1P21229015", "glosa": "XIV CDS 2026", "cuenta_destino": "Cuenta Corriente 200****154", "titular_destino": "BEDOYA ALIPAZ NICOLAS", "titular_origen": null, "banco_destino_impreso": null, "legible": true, "confianza": "alta", "dudas": null, "extras": { "bancarizacion_abono": "2P21229016" } } },
+  { "archivo": "inscripciones/0000000000003_Ejemplo_Tres.png", "filas": [ { "id": "ej-3" } ],
+    "verdad": { "banco_origen": "BCP", "formato": "BCP Banca Móvil", "tipo_transaccion": "QR", "monto": 125, "moneda": "BOB", "fecha_hora_impresa": "2026-09-17 20:55:02", "nro_operacion": "0726091700256711", "glosa": "BM QR XIV CDS 2026", "cuenta_destino": "2000274154", "titular_destino": "BEDOYA ALIPAZ NICOLAS", "titular_origen": "Pagador Tres", "banco_destino_impreso": "BNB", "legible": true, "confianza": "alta", "dudas": null, "extras": { "ci_nit_destino": "6210702" } } },
+  { "archivo": "inscripciones/0000000000004_Ejemplo_Cuatro.jpg", "filas": [ { "id": "ej-4" } ],
+    "verdad": { "banco_origen": "Mercantil", "formato": "BMSC app", "tipo_transaccion": "transferencia", "monto": 200, "moneda": "BOB", "fecha_hora_impresa": "2026-09-18 12:25:10", "nro_operacion": "1003202609181719167", "glosa": "XIV CDS 2026", "cuenta_destino": "2000274154", "titular_destino": "BEDOYA ALIPAZ NICOLAS", "titular_origen": "Pagador Cuatro", "banco_destino_impreso": "Banco Nacional de Bolivia", "legible": true, "confianza": "alta", "dudas": "el lector leyó 250 pero el comprobante dice 200", "extras": {} } }
+ ]
+}

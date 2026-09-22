@@ -1,0 +1,7 @@
+{
+  "name": "adescruz-ocr-harness",
+  "private": true,
+  "type": "module",
+  "description": "Harness de medición del lector de comprobantes (OCR) de ADESCRUZ. Solo lectura sobre Supabase; sin dependencias.",
+  "engines": { "node": ">=22.18" }
+}

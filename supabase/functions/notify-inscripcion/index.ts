@@ -76,6 +76,118 @@ async function adjuntoComprobante(record: any): Promise<{ filename: string; cont
   }
 }
 
+// ── Recordatorio de afiliación pendiente, con los QR adjuntos ────────────────
+// Pedido de Daniel (21-sep-2026): «en el mail de confirmación, también le llegue
+// el recordatorio (breve) de cuánto deben de afiliación y los qr para pagar».
+// Decisiones: TODOS los años pendientes (2024 en adelante), QR como imágenes
+// adjuntas (las apps de banco leen un QR de la galería, no de un enlace), solo
+// cuando hay deuda, y sin indicar qué escribir: el QR ya trae la glosa fija.
+// La deuda 2025 es una PROYECCIÓN desde el padrón 2024 (puede reclamarle a quien
+// ya pagó): por eso el texto dice «según nuestros registros» y pide el
+// comprobante si ya pagó. Una afiliación con comprobante subido está «en
+// verificación» y NO se recuerda. Cualquier error acá devuelve null: el correo
+// de inscripción sale igual, sin recordatorio.
+type Deuda = {
+  anios: Array<{ temporada: number; total: number; cuota: number; caballos: Array<{ nombre: string; costo: number }> }>
+  total: number
+}
+
+const norm = (s: unknown) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .toLowerCase().replace(/\s+/g, ' ').trim()
+// Formato boliviano: punto para miles, coma para decimales (Bs 1.252,80).
+const bs = (n: number) => {
+  const [ent, dec] = (Math.round(n * 100) / 100).toFixed(2).split('.')
+  return 'Bs ' + ent.replace(/\B(?=(\d{3})+(?!\d))/g, '.') + ',' + dec
+}
+
+async function deudaAfiliacion(record: any): Promise<Deuda | null> {
+  try {
+    const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+    // El jinete se busca por nombre normalizado (sin tildes ni mayúsculas): el
+    // formulario autocompleta desde el padrón, y en el XIII+XIV 101 de 103
+    // inscripciones coincidían exactas. Si hay 0 o más de 1, no se recuerda nada.
+    const { data: jinetes, error: e1 } = await sb.from('jinetes').select('id, nombre')
+    if (e1 || !jinetes) return null
+    const k = norm(record.nombre)
+    const cand = jinetes.filter((j: any) => norm(j.nombre) === k)
+    if (cand.length !== 1) return null
+
+    const { data: afs, error: e2 } = await sb.from('afiliaciones')
+      .select('temporada, monto_esperado, afiliacion_caballos!afiliacion_caballos_afiliacion_id_fkey(nombre_caballo, costo_aplicado)')
+      .eq('jinete_id', cand[0].id).eq('estado', 'pendiente').is('comprobante_url', null)
+      .gte('temporada', 2024).order('temporada')
+    if (e2 || !afs || !afs.length) return null
+
+    const anios = afs.map((a: any) => {
+      const caballos = (a.afiliacion_caballos || [])
+        .map((c: any) => ({ nombre: String(c.nombre_caballo || ''), costo: Number(c.costo_aplicado || 0) }))
+      const total = Number(a.monto_esperado || 0)
+      const cuota = Math.max(0, total - caballos.reduce((s: number, c: any) => s + c.costo, 0))
+      return { temporada: Number(a.temporada), total, cuota, caballos }
+    }).filter((a: any) => a.total > 0)
+    if (!anios.length) return null
+    return { anios, total: anios.reduce((s: number, a: any) => s + a.total, 0) }
+  } catch (e) {
+    console.error('Error calculando la deuda de afiliación:', e)
+    return null
+  }
+}
+
+// Los QR viven en el bucket público `qr-pagos`, en la raíz, con los nombres con
+// que los subió Daniel (con espacios y mayúsculas). Uno por gestión pendiente.
+async function adjuntosQr(anios: number[]): Promise<Array<{ filename: string; content: string }>> {
+  const out: Array<{ filename: string; content: string }> = []
+  try {
+    const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+    for (const anio of anios) {
+      for (const nombre of [`QR Afiliacion ${anio}.jpeg`, `QR Afiliacion ${anio}.jpg`, `QR Afiliacion ${anio}.png`]) {
+        const { data, error } = await sb.storage.from('qr-pagos').download(nombre)
+        if (error || !data) continue
+        const bytes = new Uint8Array(await data.arrayBuffer())
+        if (!bytes.length || bytes.length > 2 * 1024 * 1024) break
+        out.push({ filename: `QR_Afiliacion_${anio}.${nombre.split('.').pop()}`, content: bytesABase64(bytes) })
+        break
+      }
+    }
+  } catch (e) {
+    console.error('Error adjuntando los QR:', e)
+  }
+  return out
+}
+
+function bloqueDeudaJinete(deuda: Deuda, conQr: boolean): string {
+  const filas = deuda.anios.map((a) => {
+    const detalle = [
+      a.cuota > 0 ? `cuota del jinete ${bs(a.cuota)}` : 'cuota del jinete ya cancelada',
+      ...a.caballos.map((c) => `${esc(c.nombre)} ${c.costo > 0 ? bs(c.costo) : '(sin costo)'}`),
+    ].join(' + ')
+    return `<tr>
+          <td style="padding: 8px 0; border-bottom: 1px solid #fde68a; color: #92400e; font-size: 13px; font-weight: 600;">Afiliación ${a.temporada}</td>
+          <td style="padding: 8px 0; border-bottom: 1px solid #fde68a; color: #111827; font-size: 13px; text-align: right;"><strong>${bs(a.total)}</strong><br><span style="color:#6b7280;font-size:11px;">${detalle}</span></td>
+        </tr>`
+  }).join('')
+  return `
+      <div style="margin: 28px 0 0 0; background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 16px 18px;">
+        <p style="margin: 0 0 6px 0; color: #92400e; font-size: 14px; font-weight: 700;">Recordatorio de afiliación</p>
+        <p style="margin: 0 0 12px 0; color: #78350f; font-size: 13px; line-height: 1.5;">
+          Según nuestros registros, tiene pendiente el pago de la afiliación anual de ADESCRUZ:
+        </p>
+        <table style="width: 100%; border-collapse: collapse;">${filas}
+        <tr>
+          <td style="padding: 10px 0 0 0; color: #92400e; font-size: 13px; font-weight: 700;">Total pendiente</td>
+          <td style="padding: 10px 0 0 0; color: #92400e; font-size: 15px; text-align: right; font-weight: 700;">${bs(deuda.total)}</td>
+        </tr>
+        </table>
+        <p style="margin: 14px 0 0 0; color: #78350f; font-size: 13px; line-height: 1.5;">
+          ${conQr
+            ? 'Adjuntamos el QR de cada gestión pendiente: <strong>un pago por gestión</strong>, escribiendo el monto indicado. Puede abrir la imagen desde su galería con la app de su banco.'
+            : 'Puede pagar desde su perfil en <a href="https://adescruz.com/perfiles" style="color:#92400e;font-weight:600;">adescruz.com</a> (Mi perfil → Pagar).'}
+          Después suba el comprobante desde su perfil en <a href="https://adescruz.com/perfiles" style="color:#92400e;font-weight:600;">adescruz.com</a>.
+          <strong>Si ya pagó, disculpe el aviso</strong> y envíenos el comprobante por el mismo camino para registrarlo.
+        </p>
+      </div>`
+}
+
 serve(async (req) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 })
@@ -90,15 +202,19 @@ serve(async (req) => {
     }
 
     const adjunto = await adjuntoComprobante(record)
+    const deuda = await deudaAfiliacion(record)
+    const qrs = deuda ? await adjuntosQr(deuda.anios.map((a) => a.temporada)) : []
+    const bloqueDeuda = deuda ? bloqueDeudaJinete(deuda, qrs.length > 0) : ''
+    const attachmentsJinete = [...(adjunto ? [adjunto] : []), ...qrs]
     const attachments = adjunto ? [adjunto] : undefined
 
-    // Email 1: To jinete — confirmation receipt
+    // Email 1: To jinete — confirmation receipt (+ recordatorio de afiliación si debe)
     // NOTE: inscripciones table must have email field — celular is phone only
     const emailToJinete = await sendEmailViaResend({
       to: record.email, // FIXED: Use email field, not celular (phone number)
       subject: `Inscripción recibida — CDS ${record.concurso_id}`,
-      html: generateInscripcionConfirmationEmail(record, !!adjunto),
-      attachments,
+      html: generateInscripcionConfirmationEmail(record, !!adjunto, bloqueDeuda),
+      attachments: attachmentsJinete.length ? attachmentsJinete : undefined,
     })
 
     if (!emailToJinete) {
@@ -106,10 +222,13 @@ serve(async (req) => {
     }
 
     // Email 2: To admin — notification with full details
+    const deudaAdmin = deuda
+      ? `Debe afiliación: <strong>${bs(deuda.total)}</strong> (${deuda.anios.map((a) => a.temporada).join(', ')}) — se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`
+      : 'Sin afiliación pendiente registrada'
     const emailToAdmin = await sendEmailViaResend({
       to: ADMIN_EMAIL,
       subject: `[ADMIN] Nueva inscripción — ${record.nombre} (${record.concurso_id})`,
-      html: generateInscripcionAdminNotificationEmail(record, !!adjunto),
+      html: generateInscripcionAdminNotificationEmail(record, !!adjunto, deudaAdmin),
       attachments,
     })
 
@@ -159,7 +278,7 @@ async function sendEmailViaResend({
   return response.ok
 }
 
-function generateInscripcionConfirmationEmail(record: any, conAdjunto = false) {
+function generateInscripcionConfirmationEmail(record: any, conAdjunto = false, bloqueDeuda = '') {
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -223,7 +342,7 @@ function generateInscripcionConfirmationEmail(record: any, conAdjunto = false) {
           <td style="padding: 10px 0; color: #111827; font-size: 14px; text-align: right; font-weight: 500;">📎 Adjunto a este correo</td>
         </tr>` : ''}
       </table>
-
+${bloqueDeuda}
       <p style="margin: 24px 0 0 0; color: #6b7280; font-size: 13px; line-height: 1.5;">
         Si tiene dudas o necesita actualizar su información, contáctenos a través del sitio web de ADESCRUZ.
       </p>
@@ -242,7 +361,7 @@ function generateInscripcionConfirmationEmail(record: any, conAdjunto = false) {
 </html>`
 }
 
-function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = false) {
+function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = false, deudaAdmin = '') {
   const estadoColor = record.estado === 'pendiente' ? '#f59e0b' : '#10b981'
   return `<!DOCTYPE html>
 <html lang="es">
@@ -314,8 +433,12 @@ function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = fal
           <td style="padding: 12px 16px; color: #fff; font-size: 13px; border-bottom: 1px solid #e5e7eb; background: ${estadoColor}; font-weight: 600; border-radius: 4px;">${record.estado}</td>
         </tr>
         <tr>
-          <td style="padding: 12px 16px; color: #6b7280; font-size: 13px;">Fecha:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px;">${new Date(record.created_at).toLocaleString('es-BO')}</td>
+          <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Fecha:</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${new Date(record.created_at).toLocaleString('es-BO', { timeZone: 'America/La_Paz' })}</td>
+        </tr>
+        <tr>
+          <td style="padding: 12px 16px; color: #6b7280; font-size: 13px;">Afiliación:</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px;">${deudaAdmin}</td>
         </tr>
       </table>
 

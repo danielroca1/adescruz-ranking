@@ -21,6 +21,9 @@ interface InscripcionPayload {
 
 const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')
 const ADMIN_EMAIL = 'daniel.roca.s@gmail.com'
+// Adónde mandan el comprobante de afiliación (Daniel, 22-sep-2026: «pone mi
+// número de teléfono de cobranzas para que lo manden ahí»).
+const WHATSAPP_COBRANZAS = '75673220'
 
 // Todo lo que va al HTML lo escribió el jinete en el formulario público: se
 // escapa. Sin esto, un nombre con <a href=…> llegaba como enlace a un correo
@@ -135,12 +138,15 @@ async function deudaAfiliacion(record: any): Promise<Deuda | null> {
 
 // Los QR viven en el bucket público `qr-pagos`, en la raíz, con los nombres con
 // que los subió Daniel (con espacios y mayúsculas). Uno por gestión pendiente.
+// Para el correo se prefiere la versión «con titulo» (franja verde arriba con
+// «Afiliación AAAA» en blanco, pedida por Daniel el 22-sep-2026); si no está,
+// se manda el QR pelado.
 async function adjuntosQr(anios: number[]): Promise<Array<{ filename: string; content: string }>> {
   const out: Array<{ filename: string; content: string }> = []
   try {
     const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
     for (const anio of anios) {
-      for (const nombre of [`QR Afiliacion ${anio}.jpeg`, `QR Afiliacion ${anio}.jpg`, `QR Afiliacion ${anio}.png`]) {
+      for (const nombre of [`QR Afiliacion ${anio} con titulo.jpeg`, `QR Afiliacion ${anio}.jpeg`, `QR Afiliacion ${anio}.jpg`, `QR Afiliacion ${anio}.png`]) {
         const { data, error } = await sb.storage.from('qr-pagos').download(nombre)
         if (error || !data) continue
         const bytes = new Uint8Array(await data.arrayBuffer())
@@ -180,10 +186,11 @@ function bloqueDeudaJinete(deuda: Deuda, conQr: boolean): string {
         </table>
         <p style="margin: 14px 0 0 0; color: #78350f; font-size: 13px; line-height: 1.5;">
           ${conQr
-            ? 'Adjuntamos el QR de cada gestión pendiente: <strong>un pago por gestión</strong>, escribiendo el monto indicado. Puede abrir la imagen desde su galería con la app de su banco.'
-            : 'Puede pagar desde su perfil en <a href="https://adescruz.com/perfiles" style="color:#92400e;font-weight:600;">adescruz.com</a> (Mi perfil → Pagar).'}
-          Después suba el comprobante desde su perfil en <a href="https://adescruz.com/perfiles" style="color:#92400e;font-weight:600;">adescruz.com</a>.
-          <strong>Si ya pagó, disculpe el aviso</strong> y envíenos el comprobante por el mismo camino para registrarlo.
+            ? 'Adjuntamos el QR de cada gestión pendiente: <strong>un pago por gestión</strong>, por el monto indicado. Abra la imagen desde su galería con la app de su banco.'
+            : 'Puede pagar desde su perfil en <a href="https://adescruz.com/perfiles" style="color:#92400e;font-weight:600;">adescruz.com/perfiles</a> (Mi perfil → Pagar).'}
+          Cuando pague, envíe el comprobante por WhatsApp al <strong>${WHATSAPP_COBRANZAS}</strong> (cobranzas ADESCRUZ)
+          o súbalo desde su perfil en <a href="https://adescruz.com/perfiles" style="color:#92400e;font-weight:600;">adescruz.com/perfiles</a>.
+          <strong>Si ya pagó, disculpe el aviso</strong> y mándenos el comprobante al mismo WhatsApp para registrarlo.
         </p>
       </div>`
 }

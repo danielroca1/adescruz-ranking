@@ -232,11 +232,22 @@ serve(async (req) => {
     const deudaAdmin = deuda
       ? `Debe afiliación: <strong>${bs(deuda.total)}</strong> (${deuda.anios.map((a) => a.temporada).join(', ')}) — se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`
       : 'Sin afiliación pendiente registrada'
+    // En el [ADMIN] el comprobante va INCRUSTADO en el cuerpo (Daniel, 22-sep-2026:
+    // «ahí debe ir el archivo, idealmente en el cuerpo del correo, no como
+    // adjunto»): imagen inline por Content-ID. Un PDF no se puede mostrar como
+    // imagen: queda adjunto y el correo lo dice.
+    const extComp = adjunto ? adjunto.filename.split('.').pop()!.toLowerCase() : ''
+    const esImagen = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(extComp)
+    const adjuntoAdmin = adjunto
+      ? (esImagen
+          ? { ...adjunto, content_id: 'comprobante', content_type: extComp === 'jpg' ? 'image/jpeg' : `image/${extComp}` }
+          : adjunto)
+      : null
     const emailToAdmin = await sendEmailViaResend({
       to: ADMIN_EMAIL,
       subject: `[ADMIN] Nueva inscripción — ${record.nombre} (${record.concurso_id})`,
-      html: generateInscripcionAdminNotificationEmail(record, !!adjunto, deudaAdmin),
-      attachments,
+      html: generateInscripcionAdminNotificationEmail(record, !!adjunto, deudaAdmin, esImagen),
+      attachments: adjuntoAdmin ? [adjuntoAdmin] : undefined,
     })
 
     if (!emailToAdmin) {
@@ -265,7 +276,7 @@ async function sendEmailViaResend({
   to: string
   subject: string
   html: string
-  attachments?: Array<{ filename: string; content: string }>
+  attachments?: Array<{ filename: string; content: string; content_id?: string; content_type?: string }>
 }) {
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -368,7 +379,7 @@ ${bloqueDeuda}
 </html>`
 }
 
-function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = false, deudaAdmin = '') {
+function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = false, deudaAdmin = '', inline = false) {
   const estadoColor = record.estado === 'pendiente' ? '#f59e0b' : '#10b981'
   return `<!DOCTYPE html>
 <html lang="es">
@@ -433,7 +444,7 @@ function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = fal
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Comprobante:</td>
-          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${conAdjunto ? '📎 Adjunto a este correo' : record.comprobante_url ? '⚠️ No se pudo adjuntar: verlo en el admin' : '❌ No subió comprobante'}</td>
+          <td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb;">${conAdjunto ? (inline ? '🖼 Abajo, en este correo' : '📎 Adjunto a este correo (PDF)') : record.comprobante_url ? '⚠️ No se pudo adjuntar: verlo en el admin' : '❌ No subió comprobante'}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Estado:</td>
@@ -448,7 +459,10 @@ function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = fal
           <td style="padding: 12px 16px; color: #111827; font-size: 13px;">${deudaAdmin}</td>
         </tr>
       </table>
-
+${conAdjunto && inline ? `
+      <p style="margin: 20px 0 8px 0; color: #111827; font-size: 14px; font-weight: 700;">Comprobante</p>
+      <img src="cid:comprobante" alt="Comprobante de pago" style="display:block; max-width: 100%; width: 100%; border: 1px solid #e5e7eb; border-radius: 8px;">` : conAdjunto ? `
+      <p style="margin: 20px 0 0 0; color: #6b7280; font-size: 13px;">📎 El comprobante es un PDF: va adjunto a este correo.</p>` : ''}
       <p style="margin: 24px 0 0 0; color: #6b7280; font-size: 13px;">
         Accede al panel de administración para revisar y confirmar el pago de esta inscripción.
       </p>

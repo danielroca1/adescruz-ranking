@@ -35,37 +35,53 @@ export const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
-export const PROMPT_OCR = `You are an OCR specialist analyzing a Bolivian bank transfer receipt (comprobante de pago bancario).
+// 🔧 v23 (22-sep-2026): guía por banco. Medida en el harness sobre los 112 comprobantes del
+// XIII y el XIV contra la tabla de verdad: N° de operación 75 % → 97 %, glosa 81 % → 100 %,
+// banco 82 % → 98 %; BNB con error 26/36 → 3/36; Ganadero sigue 0/34. El texto fuente vive en
+// scripts/ocr-harness/prompts/v23-banco.txt: cualquier cambio se mide ahí ANTES de tocarlo acá.
+export const PROMPT_OCR = `You are an OCR specialist analyzing a Bolivian bank transfer or QR payment receipt (comprobante de pago bancario).
 
 Extract these fields and return ONLY a single valid JSON object — no markdown, no commentary, no code fences.
 
 Required JSON shape:
 {
-  "banco_origen": string|null,        // e.g. "Banco Ganadero", "BMSC", "Banco Mercantil Santa Cruz"
-  "titular_origen": string|null,       // Name of the person/entity who paid
-  "monto": number|null,                // Amount in Bs. Number only, no currency symbol
+  "banco_origen": string|null,        // Bank that ISSUED this receipt (the payer's bank). Use one of: "BNB", "Banco Ganadero", "BCP", "Banco Mercantil Santa Cruz", "Banco Económico", "BancoSol", "BISA", "Banco Unión", or the printed name if another bank
+  "formato_detectado": string|null,   // Short label of the receipt format you recognized (e.g. "BNB transferencia a terceros simple", "Ganadero Pago QR realizado", "BCP Banca Móvil transferencia", "Mercantil Transferencia exitosa", "Económico Pago con QR", "BancoSol altoke", "Unión UNI móvil"), or null if unknown
+  "titular_origen": string|null,       // Name of the person/entity who paid, if printed
+  "monto": number|null,                // Amount transferred, in Bs. Number only
   "moneda": "BOB"|"USD"|null,
-  "fecha_pago": string|null,           // ISO 8601 with time if visible (YYYY-MM-DDTHH:MM:SS), Bolivia timezone
-  "nro_operacion": string|null,         // Transaction/operation/reference number
-  "cuenta_destino": string|null,        // Destination account number
-  "titular_destino": string|null,       // Name of recipient
-  "banco_destino": string|null,         // Destination bank name
-  "glosa": string|null,                 // Reason / concept / "concepto" / description
+  "fecha_pago": string|null,           // "YYYY-MM-DDTHH:MM:SS" — the date and time PRINTED on the receipt, as printed (local Bolivian time), no timezone suffix. Omit seconds if not printed ("YYYY-MM-DDTHH:MM")
+  "nro_operacion": string|null,         // The bank's transaction/operation number — see the per-bank rules below. Copy it EXACTLY, character by character
+  "cuenta_destino": string|null,        // Destination account number EXACTLY as printed, including any mask (e.g. "200****154")
+  "titular_destino": string|null,       // Name of the recipient, if printed
+  "banco_destino": string|null,         // Destination bank, if printed (often it is NOT printed for same-bank transfers: then null)
+  "glosa": string|null,                 // The concept / reason / reference text of the transfer, as printed
   "tipo_transaccion": string|null,      // "transferencia" | "QR" | "deposito" | etc.
   "confianza": number,                  // YOUR confidence (0.0-1.0) that the extraction is reliable
-  "notas": string|null                  // Any caveats: image cut off, blurry, ambiguous fields
+  "notas": string|null                  // Caveats only: cut-off image, blurry, ambiguous fields. Do NOT copy account numbers into notes
 }
 
-Rules:
-- If a field is unclear or absent, use null. Do NOT invent data.
-- DATES ARE BOLIVIAN: numeric dates are DAY/MONTH/YEAR (DD/MM/YYYY). Example: "01/06/2026" means 1 June 2026, NOT January 6. Output "fecha_pago" as ISO 8601 (YYYY-MM-DDTHH:MM:SS) with the day and month in the CORRECT positions.
-- "monto" is the AMOUNT TRANSFERRED (not balance, not commission). Look for "monto", "importe", "total", "Bs."
-- Bolivian receipts often show "operación N°" or "número de operación" or "referencia" — that's "nro_operacion".
-- "nro_operacion" IS A CODE, NEVER A DESCRIPTION. It is digits, or digits mixed with a few letters (e.g. "999546421", "1P21377223"). If the only thing near that label is descriptive text like "XIII CDS 2026", "Afiliacion ADESCRUZ 2026", "pago inscripcion" or a person's name, that text is the GLOSA — put it in "glosa" and set "nro_operacion" to null. NEVER put concept text in "nro_operacion": a wrong value there is worse than null, because the system treats it as a unique payment identifier.
-- "glosa" is the concept/reason of the transfer, labelled "glosa", "concepto", "detalle", "motivo", "referencia" or "descripción". If you see concept text anywhere on the receipt, it belongs here — do not leave "glosa" null while putting that same text in another field.
-- "cuenta_destino": COPY IT EXACTLY AS PRINTED, INCLUDING THE MASK. Many Bolivian banks partially hide it (e.g. "200****154", "•••• 4154"). Do NOT guess the hidden digits, do NOT drop the mask characters, and do NOT return only the visible digits — reproduce the string as shown. The system knows how to match a masked account.
-- For QR payments, "banco_destino" may be inferred from the recipient's account prefix or QR provider.
-- If you cannot find ANY of the fields (image is not a receipt), set "confianza": 0 and "notas": "Not a bank receipt".`;
+STEP 1 — IDENTIFY THE BANK FIRST, then apply that bank's rules. The bank name is often ONLY in the logo or watermark (Mercantil Santa Cruz, Banco Unión): read it from the logo anyway and fill "banco_origen".
+
+PER-BANK RULES (where each field is on each bank's receipt):
+
+- BNB ("BNB — Comprobante Electrónico", green): "nro_operacion" = the value labelled "Bancarización Débito" — exactly 10 characters: 1 digit + 1 LETTER + 8 digits (count them; if you read 9 characters, one is missing: re-read or return null) (e.g. "2P75612112", "1P73708747", "2O01951503"; the second character is a letter, usually P, sometimes O). NEVER use "Bancarización Abono" (it is a different code), NEVER use the long "Comprobante:" string with asterisks (it contains dates, codes and account numbers and is NOT the operation number), and NEVER use "Referencia" — "Referencia" is the GLOSA. The origin account is masked and the destination bank is usually not printed (leave "banco_destino" null). Time is printed on its own line ("Hora de la transacción").
+- Banco Ganadero ("¡Pago QR realizado!" / "¡Pago QR exitoso!", green): "nro_operacion" = "Número de operación" or "Nro." at the bottom, 9-10 digits. The glosa is the free text line below the amount (no label). Date and time are printed together ("21/09/2026 - 16:06 hrs"); no seconds.
+- BCP / Banco de Crédito ("Banca Móvil — Comprobante", orange/blue): "nro_operacion" = "Número de transacción", 16 digits starting with "07"; if it is split across two lines, join the digits. The receipt has TWO blocks with the same inner labels ("A nombre de", "Del banco"): the block labelled "De la cuenta" is the ORIGIN and the block labelled "A la cuenta" is the DESTINATION — decide by the label, never by position (their order changes between variants). The glosa is "Motivo" (it may start with "BM QR "). Some variants do not print the destination name: then "titular_destino" is null — do not fill it with the payer.
+- Banco Mercantil Santa Cruz ("¡Transferencia exitosa!" in the app, or "Transferencia realizada exitosamente" on the web; bank name only in the logo): "nro_operacion" = "Código" / "Código de transacción", 18-19 DIGITS starting with "1003" (digits only — never a letter; count them: if you read fewer than 18, re-read). "cuenta_destino" = the 10-digit number on the "Cuenta destino" line (e.g. 2000274154). The line "CI / NIT 6210702" (7-8 digits) under it is the holder's ID card — it is NEVER the account; do not put it in "cuenta_destino". "banco_origen" is "Banco Mercantil Santa Cruz" even though only the logo shows it.
+- Banco Económico ("Pago con QR — Pago completado"): "nro_operacion" = "Nro. de transacción", 9 digits (not "Código de autorización"). The glosa is the preloaded field labelled "Nota:" or "Motivo:" — NEVER "Nota del cliente:" (that is free text typed by the payer; ignore it). "NIT o carnet" printed next to the destination is an ID, not the account.
+- BancoSol ("altoke" / "¡Pago QR realizado!" purple / "BTS Transferencia ACH"): "nro_operacion" = "Transacción" or "Número de comprobante", formatted like "18092026/295/398/012/9405" — copy it WITH the slashes. Glosa = "Detalle" / "Descripción".
+- BISA ("Pago QR realizado" / "Tu pago se realizó correctamente"): "nro_operacion" = "Número de transacción" (11 digits). The app variant also prints "Número de operación e-BISA" (9 digits): IGNORE it. In the destination block, "CI/NIT" is an ID, not the account; the account is the 10-digit line below the name.
+- Banco Unión ("UNI móvil plus — COMPROBANTE DE PAGO"; bank name in the watermark): "nro_operacion" = "Transacción N°", 20 digits, usually split across two lines — join them. "Referencia" is the GLOSA.
+
+GENERAL RULES:
+- "nro_operacion" IS A CODE, NEVER A DESCRIPTION. Concept text like "XIV CDS 2026", "Pago Afiliacion Adescruz 2026" or a person's name is the GLOSA — put it in "glosa" and never in "nro_operacion". A wrong operation number is worse than null: the system treats it as a unique payment identifier.
+- Copy numbers character by character. Where the bank's pattern says a position is a digit, read it as a digit (do not output "S" for "5", "O" for "0", "B" for "8"). If you genuinely cannot tell a character, set "nro_operacion" to null and explain in "notas" — do not guess.
+- If a field is unclear or absent, use null. Do NOT invent data. Do not fill "banco_destino" or "titular_destino" when they are not printed.
+- DATES ARE BOLIVIAN: numeric dates are DAY/MONTH/YEAR (DD/MM/YYYY). "01/06/2026" means 1 June 2026. Months may be written in Spanish ("9 de Septiembre, 2026 a las 19:28"). Output "fecha_pago" with day and month in the CORRECT positions and the time exactly as printed, no timezone.
+- "monto" is the AMOUNT TRANSFERRED (not balance, not commission).
+- "cuenta_destino": COPY IT EXACTLY AS PRINTED, INCLUDING THE MASK ("200****154", "•••• 4154"). Do not guess hidden digits, do not drop the mask characters.
+- If the image is not a bank receipt (e.g. a list of account movements, a screenshot of a web form), set "confianza": 0 and say so in "notas".`;
 export function jsonResp(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -107,6 +123,33 @@ export async function callClaudeVision(imageBase64: string, mediaType: string, a
   try { return JSON.parse(cleaned); }
   catch (e) { throw new Error(`Claude returned non-JSON: ${cleaned.slice(0, 200)}`); }
 }
+// ─── Doble lectura: dos lecturas independientes tienen que coincidir ─────────
+// Medido el 22-sep-2026 (harness, 112 comprobantes, 2 lecturas cada uno): los
+// errores que quedaban tras la guía por banco eran de UN carácter (una S por un
+// 5, un dígito de más en un Código del Mercantil) y ninguna forma los detecta.
+// Dos lecturas con temperatura 1 casi nunca se equivocan igual: coincidieron
+// 110 de 112, y las 2 que no, eran exactamente las mal leídas. Con esto, 0
+// aprobaciones automáticas incorrectas en el set. Cuesta una llamada más
+// (~US$0,015 por comprobante). Si la segunda lectura falla, no hay consenso:
+// la fila va a revisión, no se aprueba sola con una lectura sin contraste.
+export async function leerConConsenso(imageBase64: string, mediaType: string, apiKey: string) {
+  const [r1, r2] = await Promise.allSettled([
+    callClaudeVision(imageBase64, mediaType, apiKey),
+    callClaudeVision(imageBase64, mediaType, apiKey),
+  ]);
+  if (r1.status === 'rejected') throw r1.reason;         // sin primera lectura no hay nada
+  const extracted = r1.value;
+  if (r2.status === 'rejected') {
+    return { extracted, consenso: { coincide: false, motivo: `la segunda lectura falló: ${r2.reason?.message || r2.reason}`, nro2: null, monto2: null } };
+  }
+  const n1 = normalizarNroOperacion(extracted?.nro_operacion), n2 = normalizarNroOperacion(r2.value?.nro_operacion);
+  const m1 = Number(extracted?.monto), m2 = Number(r2.value?.monto);
+  const coincide = !!n1 && n1 === n2 && Number.isFinite(m1) && m1 === m2;
+  const motivo = coincide ? null
+    : `las dos lecturas del comprobante no coinciden (N° "${n1 ?? '—'}" vs "${n2 ?? '—'}", monto ${isNaN(m1) ? '—' : m1} vs ${isNaN(m2) ? '—' : m2})`;
+  return { extracted, consenso: { coincide, motivo, nro2: n2, monto2: isNaN(m2) ? null : m2 } };
+}
+
 export function detectMediaType(filename: string): string {
   const ext = filename.toLowerCase().split('.').pop();
   if (ext === 'png')  return 'image/png';

@@ -19,7 +19,7 @@ import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.7';
 import {
   VALIDACION, corsHeaders, PROMPT_OCR,
-  jsonResp, callClaudeVision, detectMediaType, bytesToBase64, parseFechaPago,
+  jsonResp, callClaudeVision, leerConConsenso, detectMediaType, bytesToBase64, parseFechaPago,
   normalizarNroOperacion,
   validarPago,
 } from '../_shared/validacion-pagos.ts';
@@ -223,9 +223,9 @@ serve(async (req) => {
     const base64 = bytesToBase64(bytes);
     const mediaType = detectMediaType(afil.comprobante_url);
 
-    // 6. OCR con Claude
-    let extracted;
-    try { extracted = await callClaudeVision(base64, mediaType, apiKey); }
+    // 6. OCR con Claude — DOS lecturas (22-sep-2026): solo se aprueba solo si coinciden
+    let extracted, consenso;
+    try { ({ extracted, consenso } = await leerConConsenso(base64, mediaType, apiKey)); }
     catch (err) {
       const motivo = `Error OCR: ${err.message}`;
       await sb.from('afiliaciones').update({
@@ -242,6 +242,11 @@ serve(async (req) => {
     // 7. Validar
     const ventanaDesde = new Date(Date.now() - VALIDACION.ventana_dias_atras * 86400000);
     let { estado, motivo } = validarPago(extracted, { expected, ventanaDesde, glosaEsperada, exigirMonto: true });
+    // Sin consenso entre las dos lecturas, una aprobación automática pasa a revisión.
+    if (estado === 'aprobada' && consenso && !consenso.coincide) {
+      estado = 'revision_manual';
+      motivo = `Doble lectura: ${consenso.motivo}`;
+    }
 
     // 8. Anti-reúso ATÓMICO (cross-table, sin race): al APROBAR, reclamar el nro_operacion en
     //    operaciones_consumidas (PK única). Si ya lo consumió OTRO comprobante → reúso → rechazada.

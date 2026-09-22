@@ -14,7 +14,7 @@ import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.7';
 import {
   VALIDACION, corsHeaders, PROMPT_OCR,
-  jsonResp, callClaudeVision, detectMediaType, bytesToBase64, parseFechaPago,
+  jsonResp, callClaudeVision, leerConConsenso, detectMediaType, bytesToBase64, parseFechaPago,
   normalizarNroOperacion,
   validarPago,
 } from '../_shared/validacion-pagos.ts';
@@ -179,9 +179,9 @@ serve(async (req) => {
     const base64 = bytesToBase64(bytes);
     const mediaType = detectMediaType(insc.comprobante_url);
 
-    // 5. OCR con Claude
-    let extracted;
-    try { extracted = await callClaudeVision(base64, mediaType, apiKey); }
+    // 5. OCR con Claude — DOS lecturas (22-sep-2026): solo se aprueba solo si coinciden
+    let extracted, consenso;
+    try { ({ extracted, consenso } = await leerConConsenso(base64, mediaType, apiKey)); }
     catch (err) {
       const motivo = `Error OCR: ${err.message}`;
       await sb.from('inscripciones').update({
@@ -197,6 +197,12 @@ serve(async (req) => {
     // 6. Validar
     const ventanaDesde = new Date(Date.now() - VALIDACION.ventana_dias_atras * 86400000);
     let { estado, motivo } = validarPago(extracted, { expected, ventanaDesde, glosaEsperada, cierreFecha });
+    // Sin consenso entre las dos lecturas, una aprobación automática pasa a revisión:
+    // el error de un carácter en el N° no lo detecta ninguna otra regla.
+    if (estado === 'aprobada' && consenso && !consenso.coincide) {
+      estado = 'revision_manual';
+      motivo = `Doble lectura: ${consenso.motivo}`;
+    }
 
     // 7. Anti-reúso ATÓMICO (cross-table, sin race): al APROBAR, reclamar el nro_operacion en
     //    operaciones_consumidas (PK única). Si ya lo consumió OTRO comprobante → reúso → rechazada.
@@ -233,7 +239,7 @@ serve(async (req) => {
       titular_origen: extracted.titular_origen || null,
       fecha_pago: extracted.fecha_pago || null,
       glosa: extracted.glosa || null,
-      validacion_ocr: { extracted, validacion: { estado, motivo, expected }, ts: new Date().toISOString() },
+      validacion_ocr: { extracted, validacion: { estado, motivo, expected }, consenso, prompt: 'v23', ts: new Date().toISOString() },
       revisado_en: new Date().toISOString(),
       motivo_rechazo: motivo,
     };

@@ -203,6 +203,37 @@ export function normalizarNroOperacion(v: unknown): string | null {
   return s;
 }
 
+// ─── La forma del N° de operación, banco por banco ───────────────────────────
+// Medida en los 112 comprobantes del XIII y el XIV (tabla de verdad, 22-sep-2026)
+// y escrita en la guía por banco del cerebro:
+//   BNB        1 dígito + 1 LETRA + 8 dígitos («Bancarización Débito»: 2P75612112, 2O01951503)
+//   Ganadero   9-10 dígitos («Número de operación» / «Nro.»)
+//   BCP        16 dígitos, 07 + AAMMDD + 8 («Número de transacción»)
+//   Mercantil  18-19 dígitos, 1003 + AAAAMMDD + contador diario sin ceros («Código»)
+//   Económico  9 dígitos («Nro. de transacción»)
+//   BancoSol   DDMMAAAA/999/999/999/9999 (con barras)
+//   BISA       11 dígitos («Número de transacción»; el «e-BISA» de 9 no es)
+//   Unión      20 dígitos («Transacción N°», en dos renglones)
+// Un N° que no tiene la forma de su banco es casi seguro una lectura cortada o
+// con un carácter cambiado: no se rechaza, va a revisión. Banco no reconocido →
+// null (no se chequea).
+const FORMAS_NRO: Array<{ banco: string; re: RegExp; forma: RegExp; esperado: string }> = [
+  { banco: 'BNB',       re: /\bbnb\b|banco\s+nacional/i,                    forma: /^\d[A-Z]\d{8}$/i,           esperado: '1 dígito + 1 letra + 8 dígitos' },
+  { banco: 'Ganadero',  re: /ganadero/i,                                     forma: /^\d{9,10}$/,                esperado: '9 o 10 dígitos' },
+  { banco: 'BCP',       re: /\bbcp\b|banco\s+de\s+cr[eé]dito/i,              forma: /^07\d{14}$/,                esperado: '16 dígitos que empiezan con 07' },
+  { banco: 'Mercantil', re: /mercantil|\bbmsc\b/i,                           forma: /^1003\d{14,15}$/,           esperado: '18 o 19 dígitos que empiezan con 1003' },
+  { banco: 'Económico', re: /econ[oó]mico/i,                                 forma: /^\d{9}$/,                   esperado: '9 dígitos' },
+  { banco: 'BancoSol',  re: /bancosol|banco\s+sol\b|solidario/i,             forma: /^\d{8}(\/\d{3,4}){2,4}$/,  esperado: 'DDMMAAAA/999/999/999/9999' },
+  { banco: 'BISA',      re: /\bbisa\b/i,                                     forma: /^\d{11}$/,                  esperado: '11 dígitos' },
+  { banco: 'Unión',     re: /uni[oó]n/i,                                     forma: /^\d{20}$/,                  esperado: '20 dígitos' },
+];
+export function formaNroOperacion(nro: string, bancoOrigen: unknown): { banco: string; valida: boolean; esperado: string } | null {
+  const b = String(bancoOrigen ?? '');
+  const f = FORMAS_NRO.find((x) => x.re.test(b));
+  if (!f) return null;
+  return { banco: f.banco, valida: f.forma.test(nro.trim()), esperado: f.esperado };
+}
+
 // La hora de un comprobante es la IMPRESA, en hora de Bolivia (UTC−4, sin horario
 // de verano): se pasa a UTC SUMANDO 4 horas. Antes del 21-sep-2026 el intento 0
 // hacía `new Date("2026-09-17T06:27:09")`, que a una fecha sin huso la toma en la
@@ -373,12 +404,22 @@ export function validarPago(
   // rechazan solos: que no se pueda verificar no prueba que el dinero no llegó.
   const balde = cuentaOk ? blandos : (matchCuenta === 'ilegible' ? blandos : duros);
 
-  if (!extracted.titular_destino || !VALIDACION.titular_destino_re.test(extracted.titular_destino)) {
-    balde.push(`Titular destino: leyó "${extracted.titular_destino || '—'}"`
+  // 🔧 QUINTA RECALIBRACIÓN (22-sep-2026): NO CASTIGAR LO QUE EL BANCO NO IMPRIME.
+  // Un comprobante BNB→BNB no trae el banco destino; la variante Android del BCP
+  // no trae el nombre del destinatario. Con la cuenta anclada, un campo AUSENTE
+  // no es una señal de nada: la tabla de verdad del XIII+XIV mostró 39 lecturas
+  // correctas mandadas a revisión solo por «Banco destino: leyó —». Ausente y
+  // cuenta anclada → se ignora. PRESENTE y distinto → blando (error de lectura
+  // probable). Sin ancla de cuenta, todo sigue como antes: ausente o distinto
+  // van al balde que corresponda, porque no hay otra forma de saber adónde fue.
+  const titularLeido = String(extracted.titular_destino || '').trim();
+  const bancoLeido = String(extracted.banco_destino || '').trim();
+  if (titularLeido ? !VALIDACION.titular_destino_re.test(titularLeido) : !cuentaOk) {
+    balde.push(`Titular destino: leyó "${titularLeido || '—'}"`
       + (cuentaOk ? ' (la cuenta destino SÍ coincide — probable error de lectura)' : ''));
   }
-  if (!extracted.banco_destino || !VALIDACION.banco_destino_re.test(extracted.banco_destino)) {
-    balde.push(`Banco destino: leyó "${extracted.banco_destino || '—'}"`
+  if (bancoLeido ? !VALIDACION.banco_destino_re.test(bancoLeido) : !cuentaOk) {
+    balde.push(`Banco destino: leyó "${bancoLeido || '—'}"`
       + (cuentaOk ? ' (la cuenta destino SÍ coincide — probable error de lectura)' : ''));
   }
   // Monto bajo — el dinero llegó, falta plata. Regla ya escrita en el cerebro:
@@ -437,7 +478,16 @@ export function validarPago(
   // glosa, nuestra cuenta, un desborde), no hay con qué chequear el reúso y
   // aprobarlo igual dejaba el comprobante sin protección (caso Naia Majluf,
   // 17-sep: el mismo archivo aprobado dos veces).
-  const faltaNro   = !normalizarNroOperacion(extracted.nro_operacion);
+  const nroNorm    = normalizarNroOperacion(extracted.nro_operacion);
+  const faltaNro   = !nroNorm;
+  // 🔧 22-sep-2026: el N° tiene que tener la FORMA del banco que lo emitió. Al
+  // dejar de castigar lo que el banco no imprime, aprobaban solos comprobantes
+  // cuyo N° el OCR había leído CORTADO (BNB de 9 caracteres: «2P2131986») o con
+  // una letra donde va un dígito: se reservaba un N° que no existe. Medido en el
+  // harness sobre 112 comprobantes: 4 de 6 aprobaciones incorrectas eran de forma
+  // inválida. Forma inválida → revisión (no rechaza). Banco desconocido → no se
+  // chequea (no hay forma conocida).
+  const formaNro   = nroNorm ? formaNroOperacion(nroNorm, extracted.banco_origen) : null;
 
   // Duros (cuenta / titular / banco destino que contradicen los nuestros) →
   // TAMBIÉN revisión manual. El robot ya no rechaza nunca.
@@ -470,6 +520,7 @@ export function validarPago(
   if (confianza < 0.7) revision.push(`OCR poco confiable (${confianza})`);
   if (faltaFecha)      revision.push('no se pudo leer la fecha del comprobante');
   if (faltaNro)        revision.push('no se pudo leer el N° de operación (no se puede chequear reúso)');
+  if (formaNro && !formaNro.valida) revision.push(`N° de operación con forma inválida para ${formaNro.banco}: "${nroNorm}" (se esperaba ${formaNro.esperado})`);
   if (opts.exigirMonto && extracted.monto == null) revision.push('no se pudo leer el monto del comprobante');
   if (revision.length) return { estado: 'revision_manual', motivo: revision.join('; ') };
 

@@ -38,8 +38,14 @@ serve(async (req) => {
   }
   if (esProvisorio(nuevo)) return json(400, { error: 'Ese correo es provisorio. Ponga una casilla suya.' });
 
-  const { data: otro } = await admin.from('perfiles').select('id').ilike('email', nuevo).neq('id', quien.id).limit(1);
-  if (otro && otro.length) {
+  // Comparación EXACTA en la base (correo_en_uso, MIGRACION_FASE2A): antes era un
+  // ilike con el texto del usuario, y % _ * funcionaban como comodines — se podían
+  // adivinar los correos de otras cuentas letra por letra. Y ahora también mira las
+  // fichas de OTROS jinetes: este correo queda como acceso sin confirmar la casilla,
+  // así que no puede ser el de una ficha ajena (con él se vinculaba esa ficha).
+  const { data: enUso, error: eUso } = await admin.rpc('correo_en_uso', { p_email: nuevo, p_uid: quien.id });
+  if (eUso) return json(500, { error: 'No se pudo verificar el correo. Intente de nuevo.' });
+  if (enUso) {
     return json(409, { error: 'Ese correo ya lo usa otra cuenta. Si es de un familiar, escriba a ADESCRUZ.' });
   }
 

@@ -110,16 +110,14 @@ async function adjuntoComprobante(record: any): Promise<{ filename: string; cont
 // verificación» y NO se recuerda. Cualquier error acá devuelve null: el correo
 // de inscripción sale igual, sin recordatorio.
 //
-// 24-sep-2026: el jinete se busca por el NOMBRE que se escribe en el formulario
-// público, y el correo va a la dirección que también se escribe ahí: cualquiera
-// podía poner el nombre de otro jinete y su propio correo y recibir la deuda de
-// ese jinete (años, montos, caballos). Ahora el recordatorio va en el correo solo
-// si esa dirección es la de la ficha del jinete o la de su cuenta
-// (`correoCoincide`); si no, la deuda sale solo en el [ADMIN].
+// El jinete se busca por el NOMBRE que se escribe en el formulario público y el
+// correo va a la dirección que también se escribe ahí, así que quien pone el
+// nombre de otro jinete recibe la deuda de ese jinete. Está bien así: Daniel
+// (24-sep-2026) — la deuda no es información confidencial ni delicada, dos
+// veces al año se manda un PDF con la deuda de todos.
 type Deuda = {
   anios: Array<{ temporada: number; total: number; cuota: number; caballos: Array<{ nombre: string; costo: number }> }>
   total: number
-  correoCoincide: boolean
 }
 
 const norm = (s: unknown) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -136,20 +134,11 @@ async function deudaAfiliacion(record: any): Promise<Deuda | null> {
     // El jinete se busca por nombre normalizado (sin tildes ni mayúsculas): el
     // formulario autocompleta desde el padrón, y en el XIII+XIV 101 de 103
     // inscripciones coincidían exactas. Si hay 0 o más de 1, no se recuerda nada.
-    const { data: jinetes, error: e1 } = await sb.from('jinetes').select('id, nombre, email, perfil_id')
+    const { data: jinetes, error: e1 } = await sb.from('jinetes').select('id, nombre')
     if (e1 || !jinetes) return null
     const k = norm(record.nombre)
     const cand = jinetes.filter((j: any) => norm(j.nombre) === k)
     if (cand.length !== 1) return null
-
-    const correo = (v: unknown) => String(v ?? '').trim().toLowerCase()
-    const conocidos = [correo(cand[0].email)]
-    if (cand[0].perfil_id) {
-      const { data: perfil } = await sb.from('perfiles').select('email').eq('id', cand[0].perfil_id).maybeSingle()
-      conocidos.push(correo(perfil?.email))
-    }
-    const escrito = correo(record.email)
-    const correoCoincide = !!escrito && conocidos.includes(escrito)
 
     const { data: afs, error: e2 } = await sb.from('afiliaciones')
       .select('temporada, monto_esperado, afiliacion_caballos!afiliacion_caballos_afiliacion_id_fkey(nombre_caballo, costo_aplicado)')
@@ -165,7 +154,7 @@ async function deudaAfiliacion(record: any): Promise<Deuda | null> {
       return { temporada: Number(a.temporada), total, cuota, caballos }
     }).filter((a: any) => a.total > 0)
     if (!anios.length) return null
-    return { anios, total: anios.reduce((s: number, a: any) => s + a.total, 0), correoCoincide }
+    return { anios, total: anios.reduce((s: number, a: any) => s + a.total, 0) }
   } catch (e) {
     console.error('Error calculando la deuda de afiliación:', e)
     return null
@@ -287,9 +276,8 @@ serve(async (req) => {
 
     const adjunto = await adjuntoComprobante(record)
     const deuda = await deudaAfiliacion(record)
-    const recordarDeuda = !!deuda && deuda.correoCoincide
-    const qrs = recordarDeuda ? await adjuntosQr(deuda!.anios.map((a) => a.temporada)) : []
-    const bloqueDeuda = recordarDeuda ? bloqueDeudaJinete(deuda!, qrs.length > 0) : ''
+    const qrs = deuda ? await adjuntosQr(deuda.anios.map((a) => a.temporada)) : []
+    const bloqueDeuda = deuda ? bloqueDeudaJinete(deuda, qrs.length > 0) : ''
 
     // Email 1: To jinete — confirmation receipt (+ recordatorio de afiliación si debe).
     // Sin el comprobante adjunto (ver adjuntoComprobante).
@@ -310,9 +298,7 @@ serve(async (req) => {
     // Email 2: To admin — notification with full details
     const deudaAdmin = (deuda
       ? `Debe afiliación: <strong>${bs(deuda.total)}</strong> (${deuda.anios.map((a) => a.temporada).join(', ')}) — `
-        + (recordarDeuda
-            ? `se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`
-            : 'NO se le recordó: el correo de la inscripción no es el de su ficha ni el de su cuenta')
+        + (sobreTope ? 'no se le recordó (ver abajo)' : `se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`)
       : 'Sin afiliación pendiente registrada')
       + (sobreTope ? `<br>⚠️ No se le mandó la confirmación: esa dirección ya recibió más de ${TOPE_POR_CORREO_DIA} avisos en 24 h` : '')
     // En el [ADMIN] el comprobante va INCRUSTADO en el cuerpo (Daniel, 22-sep-2026:

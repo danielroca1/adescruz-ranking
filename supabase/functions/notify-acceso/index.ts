@@ -1,4 +1,6 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.7'
+import { esServicioOAdmin } from '../_shared/acceso.ts'
 
 interface SolicitudAccesoPayload {
   record: {
@@ -18,6 +20,14 @@ serve(async (req) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405 })
   }
+
+  // 24-sep-2026: sin llamadores activos (su trigger de la base está apagado) y sin
+  // sesión, usaba el `record` que le mandaran: cualquiera podía mandar correos
+  // desde no-reply@adescruz.com con el contenido que quisiera. Ahora solo el admin
+  // o la clave de servicio. Si se vuelve a prender el trigger, tiene que mandar
+  // la clave de servicio en Authorization.
+  const sbAcceso = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+  if (!(await esServicioOAdmin(sbAcceso, req))) return new Response('Forbidden', { status: 403 })
 
   try {
     const payload: SolicitudAccesoPayload = await req.json()

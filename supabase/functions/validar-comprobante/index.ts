@@ -18,6 +18,7 @@ import {
   normalizarNroOperacion,
   validarPago,
 } from '../_shared/validacion-pagos.ts';
+import { esServicioOAdmin } from '../_shared/acceso.ts';
 
 // Tarifas dinámicas — leídas de tabla tarifas_inscripcion. Mismo cálculo que admin.html.
 type Tarifas = {
@@ -81,6 +82,21 @@ serve(async (req) => {
     const { data: insc, error: ie } = await sb.from('inscripciones').select('*').eq('id', inscripcion_id).single();
     if (ie || !insc) return jsonResp({ error: 'Inscripción no encontrada' }, 404);
 
+    // ── Quién dispara la lectura y qué se le devuelve (24-sep-2026) ──────────
+    // Esta función no pide sesión: la llaman el formulario (con la clave pública)
+    // y el webhook de la base (sin token). Antes cualquiera con un id podía hacer
+    // leer de nuevo un comprobante y recibía todo lo leído (titular, cuenta, N°,
+    // glosa). Ahora el PÚBLICO solo dispara la lectura de una fila PENDIENTE creada
+    // hace menos de 30 min —el caso del formulario y del webhook— y recibe solo
+    // `estado` y `monto_pagado`, que es lo único que muestra la página. El admin y
+    // la clave de servicio (reintentos) siguen viendo y pudiendo todo.
+    const privilegiado = await esServicioOAdmin(sb, req);
+    const reciente = Date.now() - new Date(insc.created_at).getTime() < 30 * 60 * 1000;
+    const resp = (r: Record<string, unknown>, status = 200) => jsonResp(privilegiado ? r : {
+      ok: r.ok ?? !r.error, estado: r.estado ?? null, monto_pagado: r.monto_pagado ?? null,
+      ...(r.cached ? { cached: true } : {}), ...(r.error ? { error: 'No se pudo verificar el pago' } : {}),
+    }, status);
+
     // Idempotencia: si ya fue validada (por el navegador del jinete o por el trigger de respaldo),
     // devolver el resultado guardado sin volver a llamar a Claude. Evita doble cobro de API y doble proceso.
     //
@@ -97,11 +113,16 @@ serve(async (req) => {
     //    desandar una decisión humana. Una relectura suma evidencia, no vuelve a decidir.
     const ocrFalloInfra = !!insc.validacion_ocr && !!insc.validacion_ocr.error;
     if (insc.validacion_ocr && (!ocrFalloInfra || insc.estado === 'aprobada')) {
-      return jsonResp({ ok: true, estado: insc.estado, motivo: insc.motivo_rechazo,
+      return resp({ ok: true, estado: insc.estado, motivo: insc.motivo_rechazo,
         monto_esperado: insc.monto_esperado, monto_pagado: insc.monto_pagado, cached: true });
     }
 
-    if (!insc.comprobante_url) return jsonResp({ error: 'Inscripción sin comprobante' }, 400);
+    // El público no vuelve a disparar la lectura de una fila vieja o ya tocada.
+    if (!privilegiado && (insc.estado !== 'pendiente' || !reciente)) {
+      return resp({ ok: true, estado: insc.estado, monto_pagado: insc.monto_pagado, cached: true });
+    }
+
+    if (!insc.comprobante_url) return resp({ error: 'Inscripción sin comprobante' }, 400);
 
     // Buscar el campeonato por concurso_id (e.g. "V-CDS-2026" → numero=5) para
     // obtener glosa_esperada y cierre_fecha (esta última usada para validar
@@ -173,7 +194,7 @@ serve(async (req) => {
       await sb.from('inscripciones').update({
         estado: 'revision_manual', motivo_rechazo: motivo, revisado_en: new Date().toISOString(),
       }).eq('id', inscripcion_id);
-      return jsonResp({ ok: false, estado: 'revision_manual', motivo }, 200);
+      return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const base64 = bytesToBase64(bytes);
@@ -188,7 +209,7 @@ serve(async (req) => {
         estado: 'revision_manual', motivo_rechazo: motivo, monto_esperado: expected,
         validacion_ocr: { error: err.message, ts: new Date().toISOString() },
       }).eq('id', inscripcion_id);
-      return jsonResp({ ok: false, estado: 'revision_manual', motivo }, 200);
+      return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
 
     // Normalizar fecha_pago a ISO 8601 (Claude a veces devuelve formato español)
@@ -256,9 +277,9 @@ serve(async (req) => {
     if (nroOp) update.nro_operacion = nroOp;
 
     const { error: ue } = await sb.from('inscripciones').update(update).eq('id', inscripcion_id);
-    if (ue) return jsonResp({ error: 'No se pudo actualizar: ' + ue.message }, 500);
+    if (ue) return resp({ error: 'No se pudo actualizar: ' + ue.message }, 500);
 
-    return jsonResp({ ok: true, estado, motivo, monto_esperado: expected, monto_pagado: extracted.monto, extracted });
+    return resp({ ok: true, estado, motivo, monto_esperado: expected, monto_pagado: extracted.monto, extracted });
 
   } catch (err) {
     console.error('validar-comprobante error:', err);

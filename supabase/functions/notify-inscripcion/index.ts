@@ -63,6 +63,10 @@ function bytesABase64(bytes: Uint8Array): string {
 async function adjuntoComprobante(record: any): Promise<{ filename: string; content: string } | null> {
   const ruta = record?.comprobante_url
   if (!ruta) return null
+  // Solo el archivo de la propia inscripción (la base ya exige que lo haya subido
+  // quien inscribe, hace minutos, y que nadie más lo use) y solo imagen o PDF: el
+  // correo sale de adescruz.com a la dirección que escribió quien se inscribe.
+  if (!/^inscripciones\/[^/]+\.(jpe?g|png|webp|gif|heic|heif|pdf)$/i.test(String(ruta))) return null
   try {
     const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
     const { data, error } = await sb.storage.from('comprobantes').download(ruta)
@@ -202,11 +206,38 @@ serve(async (req) => {
 
   try {
     const payload: InscripcionPayload = await req.json()
-    const { record } = payload
 
-    if (!record) {
+    // ── Del pedido solo se usa el id (24-sep-2026) ─────────────────────────────
+    // Esta función no pide sesión (la llama el webhook de la base, sin token) y
+    // antes usaba el `record` que le mandaran: cualquiera podía mandar correos
+    // desde no-reply@adescruz.com a cualquier dirección y adjuntarse el
+    // comprobante de otra persona. Ahora: se relee la fila de la base, solo se
+    // avisa de inscripciones creadas hace menos de 15 min, y cada una UNA vez
+    // (notificaciones_enviadas, que solo toca service_role).
+    const id = String(payload?.record?.id ?? '')
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       return new Response('Invalid payload', { status: 400 })
     }
+    const sbSrv = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
+    const { data: record, error: leerErr } = await sbSrv.from('inscripciones').select('*').eq('id', id).maybeSingle()
+    if (leerErr || !record) {
+      return new Response('Not found', { status: 404 })
+    }
+    if (Date.now() - new Date(record.created_at).getTime() > 15 * 60 * 1000) {
+      return new Response('Aviso vencido', { status: 409 })
+    }
+    const { error: reclamoErr } = await sbSrv.from('notificaciones_enviadas').insert({ ref_id: id, tipo: 'inscripcion' })
+    if (reclamoErr) {
+      if (reclamoErr.code === '23505') {
+        return new Response(JSON.stringify({ success: true, skipped: 'ya avisada' }),
+          { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      // Sin la tabla (o con la base caída) el aviso sale igual: el aviso de una
+      // inscripción real no se pierde por un control extra.
+      console.error('notificaciones_enviadas:', reclamoErr.message)
+    }
+    // Si el correo al jinete falla, se libera el reclamo para no perder el aviso.
+    const liberarReclamo = () => sbSrv.from('notificaciones_enviadas').delete().eq('ref_id', id).eq('tipo', 'inscripcion')
 
     const adjunto = await adjuntoComprobante(record)
     const deuda = await deudaAfiliacion(record)
@@ -225,6 +256,7 @@ serve(async (req) => {
     })
 
     if (!emailToJinete) {
+      await liberarReclamo()
       return new Response('Failed to send email to jinete', { status: 500 })
     }
 
@@ -311,7 +343,7 @@ function generateInscripcionConfirmationEmail(record: any, conAdjunto = false, b
     <div style="background: linear-gradient(135deg, #1a4731 60%, #2d6a4f); padding: 32px 24px; text-align: center;">
       <div style="font-size: 40px; margin-bottom: 12px;">🏆</div>
       <h1 style="margin: 0; color: #fff; font-size: 24px; font-weight: 700;">Inscripción recibida</h1>
-      <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.8); font-size: 14px;">CDS ${record.concurso_id}</p>
+      <p style="margin: 8px 0 0 0; color: rgba(255,255,255,0.8); font-size: 14px;">CDS ${esc(record.concurso_id)}</p>
     </div>
 
     <!-- Content -->
@@ -321,7 +353,7 @@ function generateInscripcionConfirmationEmail(record: any, conAdjunto = false, b
       </p>
 
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
-        Recibimos su inscripción para el <strong>CDS ${record.concurso_id}</strong>. Su registro está siendo procesado.
+        Recibimos su inscripción para el <strong>CDS ${esc(record.concurso_id)}</strong>. Su registro está siendo procesado.
       </p>
 
       <p style="margin: 0 0 20px 0; color: #6b7280; font-size: 14px; line-height: 1.6;">
@@ -448,7 +480,7 @@ function generateInscripcionAdminNotificationEmail(record: any, conAdjunto = fal
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Estado:</td>
-          <td style="padding: 12px 16px; color: #fff; font-size: 13px; border-bottom: 1px solid #e5e7eb; background: ${estadoColor}; font-weight: 600; border-radius: 4px;">${record.estado}</td>
+          <td style="padding: 12px 16px; color: #fff; font-size: 13px; border-bottom: 1px solid #e5e7eb; background: ${estadoColor}; font-weight: 600; border-radius: 4px;">${esc(record.estado)}</td>
         </tr>
         <tr>
           <td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Fecha:</td>

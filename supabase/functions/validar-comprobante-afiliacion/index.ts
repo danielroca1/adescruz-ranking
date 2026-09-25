@@ -23,6 +23,7 @@ import {
   normalizarNroOperacion,
   validarPago,
 } from '../_shared/validacion-pagos.ts';
+import { esServicioOAdmin } from '../_shared/acceso.ts';
 
 // Tarifas dinámicas — leídas de tabla tarifas_afiliacion
 type TarifasAfil = {
@@ -181,6 +182,20 @@ serve(async (req) => {
         veredicto: v.estado, observaciones, monto_esperado: esperado, glosa_esperada: glosaGestion });
     }
 
+    // ── Modo normal: quién dispara la lectura y qué se le devuelve (24-sep-2026) ──
+    // Igual que en validar-comprobante: sin sesión (registro.html la llama con la
+    // clave pública), cualquiera con el id de una afiliación —los de las aprobadas
+    // son públicos— la hacía leer de nuevo el comprobante, recibía lo leído y
+    // pisaba estado, monto y N°. Ahora el PÚBLICO solo dispara la lectura de una
+    // afiliación PENDIENTE creada hace menos de 30 min y recibe solo estado y
+    // monto_pagado. El admin y la clave de servicio, como antes.
+    const privilegiado = await esServicioOAdmin(sb, req);
+    const reciente = Date.now() - new Date(afil.created_at).getTime() < 30 * 60 * 1000;
+    const resp = (r: Record<string, unknown>, status = 200) => jsonResp(privilegiado ? r : {
+      ok: r.ok ?? !r.error, estado: r.estado ?? null, monto_pagado: r.monto_pagado ?? null,
+      ...(r.cached ? { cached: true } : {}), ...(r.error ? { error: 'No se pudo verificar el pago' } : {}),
+    }, status);
+
     // Idempotencia: si ya fue validada (por el navegador o por el trigger de respaldo), devolver lo guardado.
     //
     // Mismas dos excepciones que en `validar-comprobante` (ver el comentario largo allá):
@@ -189,11 +204,16 @@ serve(async (req) => {
     // pero una fila ya APROBADA no se re-valida nunca: no se desanda una decisión humana.
     const ocrFalloInfra = !!afil.validacion_ocr && !!afil.validacion_ocr.error;
     if (afil.validacion_ocr && (!ocrFalloInfra || afil.estado === 'aprobada')) {
-      return jsonResp({ ok: true, estado: afil.estado, motivo: afil.motivo_rechazo,
+      return resp({ ok: true, estado: afil.estado, motivo: afil.motivo_rechazo,
         monto_esperado: afil.monto_esperado, monto_pagado: afil.monto_pagado, cached: true });
     }
 
-    if (!afil.comprobante_url) return jsonResp({ error: 'Afiliación sin comprobante' }, 400);
+    // El público no vuelve a disparar la lectura de una afiliación vieja o ya tocada.
+    if (!privilegiado && (afil.estado !== 'pendiente' || !reciente)) {
+      return resp({ ok: true, estado: afil.estado, monto_pagado: afil.monto_pagado, cached: true });
+    }
+
+    if (!afil.comprobante_url) return resp({ error: 'Afiliación sin comprobante' }, 400);
 
     // 2. Glosa esperada (de site_config)
     let glosaEsperada: string | null = null;
@@ -217,7 +237,7 @@ serve(async (req) => {
         estado: 'revision_manual', motivo_rechazo: motivo, monto_esperado: expected,
         validacion_ocr: { error: motivo, ts: new Date().toISOString() },
       }).eq('id', afiliacion_id);
-      return jsonResp({ ok: false, estado: 'revision_manual', motivo }, 200);
+      return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const base64 = bytesToBase64(bytes);
@@ -232,7 +252,7 @@ serve(async (req) => {
         estado: 'revision_manual', motivo_rechazo: motivo, monto_esperado: expected,
         validacion_ocr: { error: err.message, ts: new Date().toISOString() },
       }).eq('id', afiliacion_id);
-      return jsonResp({ ok: false, estado: 'revision_manual', motivo }, 200);
+      return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
 
     // Normalizar fecha_pago a ISO 8601 (Claude a veces devuelve formato español)
@@ -290,9 +310,9 @@ serve(async (req) => {
     if (nroOp) update.nro_operacion = nroOp;
 
     const { error: ue } = await sb.from('afiliaciones').update(update).eq('id', afiliacion_id);
-    if (ue) return jsonResp({ error: 'No se pudo actualizar: ' + ue.message }, 500);
+    if (ue) return resp({ error: 'No se pudo actualizar: ' + ue.message }, 500);
 
-    return jsonResp({ ok: true, estado, motivo, monto_esperado: expected, monto_pagado: extracted.monto, extracted, desglose });
+    return resp({ ok: true, estado, motivo, monto_esperado: expected, monto_pagado: extracted.monto, extracted, desglose });
 
   } catch (err) {
     console.error('validar-comprobante-afiliacion error:', err);

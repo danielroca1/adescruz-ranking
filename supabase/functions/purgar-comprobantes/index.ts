@@ -146,7 +146,10 @@ serve(async (req) => {
     };
     console.log('purgar-comprobantes summary:', JSON.stringify(summary));
 
-    return jsonResp({ ok: true, ...summary, details: { inscripciones: inscResult.details, afiliaciones: afilResult.details } });
+    // 24-sep-2026: la respuesta ya no trae id ni ruta de cada comprobante (la función
+    // no pide sesión: cualquiera los veía). El detalle queda en el log de la función.
+    console.log('purgar-comprobantes detalle:', JSON.stringify({ inscripciones: inscResult.details, afiliaciones: afilResult.details }));
+    return jsonResp({ ok: true, ...summary });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('purgar-comprobantes error:', err);

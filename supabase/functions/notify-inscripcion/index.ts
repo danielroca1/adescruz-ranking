@@ -247,7 +247,14 @@ serve(async (req) => {
     if (Date.now() - new Date(record.created_at).getTime() > 15 * 60 * 1000) {
       return new Response('Aviso vencido', { status: 409 })
     }
-    const destinatario = String(record.email ?? '').trim().toLowerCase()
+    // Para el tope, la casilla real: sin «+etiqueta» y, en Gmail, sin puntos
+    // (victima+1@gmail.com y v.ictima@gmail.com son la misma casilla).
+    const destinatario = (() => {
+      const [local = '', dominio = ''] = String(record.email ?? '').trim().toLowerCase().split('@')
+      const gmail = dominio === 'gmail.com' || dominio === 'googlemail.com'
+      const l = local.split('+')[0]
+      return `${gmail ? l.replace(/\./g, '') : l}@${gmail ? 'gmail.com' : dominio}`
+    })()
     const { error: reclamoErr } = await sbSrv.from('notificaciones_enviadas').insert({ ref_id: id, tipo: 'inscripcion', destinatario })
     if (reclamoErr) {
       if (reclamoErr.code === '23505') {
@@ -261,17 +268,22 @@ serve(async (req) => {
     // Si el correo al jinete falla, se libera el reclamo para no perder el aviso.
     const liberarReclamo = () => sbSrv.from('notificaciones_enviadas').delete().eq('ref_id', id).eq('tipo', 'inscripcion')
 
-    // Tope de avisos por dirección: una familia inscribe varios binomios con el
-    // mismo correo, pero nadie legítimo pasa de ~10 en un día. Pasado el tope, el
-    // correo al jinete no sale (el [ADMIN] sí, y lo dice): el formulario no sirve
-    // para mandar correos de adescruz.com en cantidad a una dirección.
+    // Topes: una familia inscribe varios binomios con el mismo correo, pero nadie
+    // legítimo pasa de ~10 en un día; y el pico medido es de 11 inscripciones en
+    // una hora (18-sep-2026). Pasado un tope, el correo al jinete no sale (el
+    // [ADMIN] sí, y lo dice): el formulario no sirve para mandar correos de
+    // adescruz.com en cantidad.
     const TOPE_POR_CORREO_DIA = 10
-    let sobreTope = false
-    if (!reclamoErr && destinatario) {
-      const { count } = await sbSrv.from('notificaciones_enviadas').select('ref_id', { count: 'exact', head: true })
-        .eq('tipo', 'inscripcion').eq('destinatario', destinatario)
-        .gte('enviado_en', new Date(Date.now() - 24 * 3600 * 1000).toISOString())
-      sobreTope = (count ?? 0) > TOPE_POR_CORREO_DIA
+    const TOPE_TOTAL_HORA = 40
+    let sobreTope = ''
+    if (!reclamoErr) {
+      const desde = (ms: number) => new Date(Date.now() - ms).toISOString()
+      const { count: porCorreo } = await sbSrv.from('notificaciones_enviadas').select('ref_id', { count: 'exact', head: true })
+        .eq('tipo', 'inscripcion').eq('destinatario', destinatario).gte('enviado_en', desde(24 * 3600 * 1000))
+      const { count: total } = await sbSrv.from('notificaciones_enviadas').select('ref_id', { count: 'exact', head: true })
+        .eq('tipo', 'inscripcion').gte('enviado_en', desde(3600 * 1000))
+      if ((porCorreo ?? 0) > TOPE_POR_CORREO_DIA) sobreTope = `esa dirección ya recibió más de ${TOPE_POR_CORREO_DIA} avisos en 24 h`
+      else if ((total ?? 0) > TOPE_TOTAL_HORA) sobreTope = `ya salieron más de ${TOPE_TOTAL_HORA} avisos de inscripción en la última hora`
     }
 
     const adjunto = await adjuntoComprobante(record)
@@ -300,7 +312,7 @@ serve(async (req) => {
       ? `Debe afiliación: <strong>${bs(deuda.total)}</strong> (${deuda.anios.map((a) => a.temporada).join(', ')}) — `
         + (sobreTope ? 'no se le recordó (ver abajo)' : `se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`)
       : 'Sin afiliación pendiente registrada')
-      + (sobreTope ? `<br>⚠️ No se le mandó la confirmación: esa dirección ya recibió más de ${TOPE_POR_CORREO_DIA} avisos en 24 h` : '')
+      + (sobreTope ? `<br>⚠️ No se le mandó la confirmación: ${sobreTope}` : '')
     // En el [ADMIN] el comprobante va INCRUSTADO en el cuerpo (Daniel, 22-sep-2026:
     // «ahí debe ir el archivo, idealmente en el cuerpo del correo, no como
     // adjunto»): imagen inline por Content-ID. Un PDF no se puede mostrar como

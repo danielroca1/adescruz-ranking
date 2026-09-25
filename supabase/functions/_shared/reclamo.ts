@@ -19,10 +19,13 @@ export const ESPERA_PASO_MS = 1_500;
 export async function reclamarLectura(sb: SupabaseClient, tabla: 'inscripciones' | 'afiliaciones', id: string): Promise<boolean> {
   const { data, error } = await sb.rpc('reclamar_lectura_comprobante', { p_tabla: tabla, p_id: id });
   if (error) {
-    // Sin el reclamo (la base con un problema) se lee igual: un pago no se queda
-    // sin verificar por un control extra.
     console.error('reclamar_lectura_comprobante:', error.message);
-    return true;
+    // Inscripciones: sin el reclamo (la base con un problema) se lee igual; un
+    // pago no se queda sin verificar por un control extra. Afiliaciones NO: ahí
+    // el reclamo es lo que cierra la carga de caballos, y leer sin él vuelve a
+    // abrir «caballos agregados durante la lectura». Se sigue esperando y, si no
+    // se consigue, queda pendiente para el admin.
+    return tabla === 'inscripciones';
   }
   return data === true;
 }

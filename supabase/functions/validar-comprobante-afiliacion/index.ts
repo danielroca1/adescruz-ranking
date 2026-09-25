@@ -24,6 +24,7 @@ import {
   validarPago,
 } from '../_shared/validacion-pagos.ts';
 import { esServicioOAdmin } from '../_shared/acceso.ts';
+import { reclamarLectura, dormir, ESPERA_MAX_MS, ESPERA_PASO_MS } from '../_shared/reclamo.ts';
 
 // Tarifas dinámicas — leídas de tabla tarifas_afiliacion
 type TarifasAfil = {
@@ -107,7 +108,7 @@ serve(async (req) => {
     const sb = createClient(supaUrl, supaKey);
 
     // 1. Cargar afiliación
-    const { data: afil, error: ae } = await sb.from('afiliaciones').select('*').eq('id', afiliacion_id).single();
+    let { data: afil, error: ae } = await sb.from('afiliaciones').select('*').eq('id', afiliacion_id).single();
     if (ae || !afil) return jsonResp({ error: 'Afiliación no encontrada' }, 404);
 
     // ── MODO LECTURA (solo admin) ─────────────────────────────────────────
@@ -202,18 +203,37 @@ serve(async (req) => {
     // un `validacion_ocr` que solo tiene `error` es un fallo de infraestructura y no gasta el
     // intento — si no, la fila queda trabada aunque se arregle el bug y se redespliegue —
     // pero una fila ya APROBADA no se re-valida nunca: no se desanda una decisión humana.
-    const ocrFalloInfra = !!afil.validacion_ocr && !!afil.validacion_ocr.error;
-    if (afil.validacion_ocr && (!ocrFalloInfra || afil.estado === 'aprobada')) {
-      return resp({ ok: true, estado: afil.estado, motivo: afil.motivo_rechazo,
-        monto_esperado: afil.monto_esperado, monto_pagado: afil.monto_pagado, cached: true });
-    }
+    //
+    // Y una sola lectura a la vez (_shared/reclamo.ts). Acá importa más: el reclamo
+    // se hace ANTES de contar los caballos, y desde ese momento la base no acepta
+    // caballos nuevos para esta afiliación. Antes se podían agregar mientras el
+    // OCR leía, y la afiliación salía aprobada sin pagarlos.
+    const hasta = Date.now() + ESPERA_MAX_MS;
+    while (true) {
+      const ocrFalloInfra = !!afil.validacion_ocr && !!afil.validacion_ocr.error;
+      if (afil.validacion_ocr && (!ocrFalloInfra || afil.estado === 'aprobada')) {
+        return resp({ ok: true, estado: afil.estado, motivo: afil.motivo_rechazo,
+          monto_esperado: afil.monto_esperado, monto_pagado: afil.monto_pagado, cached: true });
+      }
 
-    // El público no vuelve a disparar la lectura de una afiliación vieja o ya tocada.
-    if (!privilegiado && (afil.estado !== 'pendiente' || !reciente)) {
-      return resp({ ok: true, estado: afil.estado, monto_pagado: afil.monto_pagado, cached: true });
-    }
+      // El público no vuelve a disparar la lectura de una afiliación vieja o ya
+      // tocada: solo de una reciente pendiente, o en revisión por un fallo de
+      // infraestructura sin que nadie la haya mirado.
+      const reintentoInfra = ocrFalloInfra && afil.estado === 'revision_manual' && !afil.revisado_por;
+      if (!privilegiado && (!reciente || !(afil.estado === 'pendiente' || reintentoInfra))) {
+        return resp({ ok: true, estado: afil.estado, monto_pagado: afil.monto_pagado, cached: true });
+      }
 
-    if (!afil.comprobante_url) return resp({ error: 'Afiliación sin comprobante' }, 400);
+      if (!afil.comprobante_url) return resp({ error: 'Afiliación sin comprobante' }, 400);
+
+      if (await reclamarLectura(sb, 'afiliaciones', afiliacion_id)) break;
+      if (Date.now() > hasta) {
+        return resp({ ok: true, estado: afil.estado, monto_pagado: afil.monto_pagado, cached: true });
+      }
+      await dormir(ESPERA_PASO_MS);
+      const { data: otra } = await sb.from('afiliaciones').select('*').eq('id', afiliacion_id).single();
+      if (otra) afil = otra;
+    }
 
     // 2. Glosa esperada (de site_config)
     let glosaEsperada: string | null = null;
@@ -236,6 +256,7 @@ serve(async (req) => {
       await sb.from('afiliaciones').update({
         estado: 'revision_manual', motivo_rechazo: motivo, monto_esperado: expected,
         validacion_ocr: { error: motivo, ts: new Date().toISOString() },
+        lectura_iniciada_en: null,
       }).eq('id', afiliacion_id);
       return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
@@ -251,6 +272,7 @@ serve(async (req) => {
       await sb.from('afiliaciones').update({
         estado: 'revision_manual', motivo_rechazo: motivo, monto_esperado: expected,
         validacion_ocr: { error: err.message, ts: new Date().toISOString() },
+        lectura_iniciada_en: null,
       }).eq('id', afiliacion_id);
       return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
@@ -306,6 +328,7 @@ serve(async (req) => {
       validacion_ocr: { extracted, validacion: { estado, motivo, expected, desglose }, ts: new Date().toISOString() },
       revisado_en: new Date().toISOString(),
       motivo_rechazo: motivo,
+      lectura_iniciada_en: null,
     };
     if (nroOp) update.nro_operacion = nroOp;
 

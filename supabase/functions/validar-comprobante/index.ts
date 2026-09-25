@@ -19,6 +19,7 @@ import {
   validarPago,
 } from '../_shared/validacion-pagos.ts';
 import { esServicioOAdmin } from '../_shared/acceso.ts';
+import { reclamarLectura, dormir, ESPERA_MAX_MS, ESPERA_PASO_MS } from '../_shared/reclamo.ts';
 
 // Tarifas dinámicas — leídas de tabla tarifas_inscripcion. Mismo cálculo que admin.html.
 type Tarifas = {
@@ -79,7 +80,7 @@ serve(async (req) => {
     const sb = createClient(supaUrl, supaKey);
 
     // 1. Fetch inscripción + glosa esperada del CDS
-    const { data: insc, error: ie } = await sb.from('inscripciones').select('*').eq('id', inscripcion_id).single();
+    let { data: insc, error: ie } = await sb.from('inscripciones').select('*').eq('id', inscripcion_id).single();
     if (ie || !insc) return jsonResp({ error: 'Inscripción no encontrada' }, 404);
 
     // ── Quién dispara la lectura y qué se le devuelve (24-sep-2026) ──────────
@@ -111,18 +112,36 @@ serve(async (req) => {
     //    inscripciones del XIII las verificó Daniel a mano contra el comprobante; volver a
     //    correr el OCR sobre ellas podría bajarlas a `revision_manual` o `rechazada` y
     //    desandar una decisión humana. Una relectura suma evidencia, no vuelve a decidir.
-    const ocrFalloInfra = !!insc.validacion_ocr && !!insc.validacion_ocr.error;
-    if (insc.validacion_ocr && (!ocrFalloInfra || insc.estado === 'aprobada')) {
-      return resp({ ok: true, estado: insc.estado, motivo: insc.motivo_rechazo,
-        monto_esperado: insc.monto_esperado, monto_pagado: insc.monto_pagado, cached: true });
-    }
+    //
+    // Y una sola lectura a la vez (_shared/reclamo.ts): si otra llamada ya está
+    // leyendo esta fila, se espera su resultado. Si esa lectura termina en un fallo
+    // de infraestructura, la que esperaba reintenta (el segundo intento de siempre).
+    const hasta = Date.now() + ESPERA_MAX_MS;
+    while (true) {
+      const ocrFalloInfra = !!insc.validacion_ocr && !!insc.validacion_ocr.error;
+      if (insc.validacion_ocr && (!ocrFalloInfra || insc.estado === 'aprobada')) {
+        return resp({ ok: true, estado: insc.estado, motivo: insc.motivo_rechazo,
+          monto_esperado: insc.monto_esperado, monto_pagado: insc.monto_pagado, cached: true });
+      }
 
-    // El público no vuelve a disparar la lectura de una fila vieja o ya tocada.
-    if (!privilegiado && (insc.estado !== 'pendiente' || !reciente)) {
-      return resp({ ok: true, estado: insc.estado, monto_pagado: insc.monto_pagado, cached: true });
-    }
+      // El público no vuelve a disparar la lectura de una fila vieja o ya tocada:
+      // solo de una reciente que está pendiente o que quedó en revisión por un fallo
+      // de infraestructura sin que nadie la haya mirado.
+      const reintentoInfra = ocrFalloInfra && insc.estado === 'revision_manual' && !insc.revisado_por;
+      if (!privilegiado && (!reciente || !(insc.estado === 'pendiente' || reintentoInfra))) {
+        return resp({ ok: true, estado: insc.estado, monto_pagado: insc.monto_pagado, cached: true });
+      }
 
-    if (!insc.comprobante_url) return resp({ error: 'Inscripción sin comprobante' }, 400);
+      if (!insc.comprobante_url) return resp({ error: 'Inscripción sin comprobante' }, 400);
+
+      if (await reclamarLectura(sb, 'inscripciones', inscripcion_id)) break;
+      if (Date.now() > hasta) {
+        return resp({ ok: true, estado: insc.estado, monto_pagado: insc.monto_pagado, cached: true });
+      }
+      await dormir(ESPERA_PASO_MS);
+      const { data: otra } = await sb.from('inscripciones').select('*').eq('id', inscripcion_id).single();
+      if (otra) insc = otra;
+    }
 
     // Buscar el campeonato por concurso_id (e.g. "V-CDS-2026" → numero=5) para
     // obtener glosa_esperada y cierre_fecha (esta última usada para validar
@@ -193,6 +212,7 @@ serve(async (req) => {
       const motivo = 'No se pudo bajar el comprobante: ' + (dl?.message || 'desconocido');
       await sb.from('inscripciones').update({
         estado: 'revision_manual', motivo_rechazo: motivo, revisado_en: new Date().toISOString(),
+        lectura_iniciada_en: null,
       }).eq('id', inscripcion_id);
       return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
@@ -208,6 +228,7 @@ serve(async (req) => {
       await sb.from('inscripciones').update({
         estado: 'revision_manual', motivo_rechazo: motivo, monto_esperado: expected,
         validacion_ocr: { error: err.message, ts: new Date().toISOString() },
+        lectura_iniciada_en: null,
       }).eq('id', inscripcion_id);
       return resp({ ok: false, estado: 'revision_manual', motivo }, 200);
     }
@@ -273,6 +294,7 @@ serve(async (req) => {
       validacion_ocr: { extracted, validacion: { estado, motivo, expected }, consenso, prompt: 'v23', ts: new Date().toISOString() },
       revisado_en: new Date().toISOString(),
       motivo_rechazo: motivo,
+      lectura_iniciada_en: null,
     };
     if (nroOp) update.nro_operacion = nroOp;
 

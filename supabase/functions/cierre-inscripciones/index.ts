@@ -165,23 +165,28 @@ async function sendEmail(
 
 // ─── Per-CDS processor ───────────────────────────────────────
 
-async function processCampeonato(c: Campeonato): Promise<{ ok: boolean; reason: string }> {
+async function processCampeonato(c: Campeonato, esReintento = false): Promise<{ ok: boolean; reason: string }> {
   const concursoId = buildConcursoId(c.numero, c.temporada);
   console.log(`Processing ${c.nombre} (concurso_id=${concursoId})`);
 
   // 1) Mark closed FIRST. If we crash mid-flight at least registrations
   //    won't keep coming in. cierre_ejecutado_en gates re-runs.
-  const { error: updErr } = await supabase
-    .from("campeonatos")
-    .update({
-      inscripciones_abiertas: false,
-      cierre_ejecutado_en: new Date().toISOString(),
-    })
-    .eq("id", c.id);
+  //
+  // 24-sep-2026: con una RESERVA atómica (reservar_cierre_inscripciones). La
+  // función no pide sesión y la hora del cierre es pública: N llamadas a la vez
+  // pasaban todas el SELECT de pendientes y cada una mandaba el Excel al jurado.
+  // Ahora solo UNA llamada gana cada cierre (y cada reintento del correo, que
+  // vuelve a quedar libre a los 4 min). Un reintento ya no corre
+  // cierre_ejecutado_en: validar-comprobante lo usa como hora real del cierre.
+  const { data: reservado, error: updErr } = await supabase
+    .rpc("reservar_cierre_inscripciones", { p_id: c.id, p_reintento: esReintento });
 
   if (updErr) {
     console.error(`Failed to mark CDS ${c.id} as closed:`, updErr);
     return { ok: false, reason: `update failed: ${updErr.message}` };
+  }
+  if (reservado !== true) {
+    return { ok: true, reason: "otra llamada ya lo está procesando" };
   }
 
   // 2) Fetch this CDS's inscriptions only.
@@ -236,8 +241,11 @@ async function processCampeonato(c: Campeonato): Promise<{ ok: boolean; reason: 
   (inscripciones as Inscripcion[]).forEach((i) => {
     countByCat[i.cat_concurso] = (countByCat[i.cat_concurso] || 0) + 1;
   });
+  // cat_concurso lo escribe el formulario público: se escapa (24-sep-2026).
+  const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] as string));
   const summaryHtml = Object.entries(countByCat)
-    .map(([cat, n]) => `<li><strong>${cat}:</strong> ${n} inscripción${n === 1 ? "" : "es"}</li>`)
+    .map(([cat, n]) => `<li><strong>${esc(cat)}:</strong> ${n} inscripción${n === 1 ? "" : "es"}</li>`)
     .join("");
 
   const emailBody = `
@@ -332,7 +340,7 @@ async function runCierre() {
   for (const c of (reintentos || []) as Campeonato[]) {
     if (processedIds.has(c.id)) continue;  // ya intentado en este tick
     try {
-      const r = await processCampeonato(c);
+      const r = await processCampeonato(c, true);
       results.push({ id: c.id, nombre: c.nombre, retry: true, ...r });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

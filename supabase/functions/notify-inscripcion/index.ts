@@ -55,28 +55,43 @@ function bytesABase64(bytes: Uint8Array): string {
   return btoa(bin)
 }
 
-// ── El comprobante, adjunto a los dos correos ────────────────────────────────
-// Pedido de Daniel (18-sep-2026). El formulario sube el archivo ANTES de crear
-// la inscripción, así que `comprobante_url` ya viene en el payload del webhook.
-// Si no se puede bajar, el correo sale igual sin adjunto: un adjunto nunca
-// frena el aviso de que alguien se inscribió.
-async function adjuntoComprobante(record: any): Promise<{ filename: string; content: string } | null> {
+// ── El comprobante, adjunto al correo [ADMIN] ─────────────────────────────────
+// Pedido de Daniel (18-sep-2026): el comprobante en los dos correos. Desde el
+// 24-sep-2026 va SOLO en el [ADMIN]: el formulario es público, el archivo lo sube
+// quien se inscribe y la dirección también la escribe él, así que adjuntarlo al
+// correo «del jinete» dejaba mandar cualquier PDF desde adescruz.com a cualquier
+// dirección. El jinete ya tiene su comprobante (lo acaba de subir).
+// El tipo se decide por los primeros bytes, no por la extensión (un .jfif o una
+// foto sin extensión de Android también son JPEG). Si no se puede bajar o no es
+// imagen ni PDF, el correo sale igual sin adjunto.
+const TIPOS: Array<{ ext: string; mime: string; es: (b: Uint8Array) => boolean }> = [
+  { ext: 'pdf',  mime: 'application/pdf', es: (b) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46 },
+  { ext: 'jpg',  mime: 'image/jpeg',      es: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { ext: 'png',  mime: 'image/png',       es: (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 },
+  { ext: 'gif',  mime: 'image/gif',       es: (b) => b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38 },
+  { ext: 'webp', mime: 'image/webp',      es: (b) => b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+                                                     && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50 },
+  { ext: 'heic', mime: 'image/heic',      es: (b) => String.fromCharCode(...b.subarray(4, 8)) === 'ftyp'
+                                                     && ['heic', 'heix', 'hevc', 'heim', 'heis', 'mif1', 'msf1'].includes(String.fromCharCode(...b.subarray(8, 12))) },
+]
+
+async function adjuntoComprobante(record: any): Promise<{ filename: string; content: string; mime: string } | null> {
   const ruta = record?.comprobante_url
   if (!ruta) return null
-  // Solo el archivo de la propia inscripción (la base ya exige que lo haya subido
-  // quien inscribe, hace minutos, y que nadie más lo use) y solo imagen o PDF: el
-  // correo sale de adescruz.com a la dirección que escribió quien se inscribe.
-  if (!/^inscripciones\/[^/]+\.(jpe?g|png|webp|gif|heic|heif|pdf)$/i.test(String(ruta))) return null
+  // Solo el archivo de la propia inscripción (la base exige que sea una subida de
+  // los últimos 30 min que nadie más usa).
+  if (!/^inscripciones\/[^/]+$/.test(String(ruta))) return null
   try {
     const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
     const { data, error } = await sb.storage.from('comprobantes').download(ruta)
     if (error || !data) { console.error('No se pudo bajar el comprobante', ruta, error?.message); return null }
     const bytes = new Uint8Array(await data.arrayBuffer())
     if (bytes.length > 10 * 1024 * 1024) return null
-    const ext = (String(ruta).split('.').pop() || 'jpg').toLowerCase()
+    const tipo = TIPOS.find((t) => t.es(bytes))
+    if (!tipo) { console.error('El comprobante no es imagen ni PDF', ruta); return null }
     const quien = String(record.nombre || 'jinete').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')
-    return { filename: `Comprobante_${quien}_${record.concurso_id || 'CDS'}.${ext}`, content: bytesABase64(bytes) }
+    return { filename: `Comprobante_${quien}_${record.concurso_id || 'CDS'}.${tipo.ext}`, content: bytesABase64(bytes), mime: tipo.mime }
   } catch (e) {
     console.error('Error adjuntando el comprobante:', e)
     return null
@@ -94,9 +109,17 @@ async function adjuntoComprobante(record: any): Promise<{ filename: string; cont
 // comprobante si ya pagó. Una afiliación con comprobante subido está «en
 // verificación» y NO se recuerda. Cualquier error acá devuelve null: el correo
 // de inscripción sale igual, sin recordatorio.
+//
+// 24-sep-2026: el jinete se busca por el NOMBRE que se escribe en el formulario
+// público, y el correo va a la dirección que también se escribe ahí: cualquiera
+// podía poner el nombre de otro jinete y su propio correo y recibir la deuda de
+// ese jinete (años, montos, caballos). Ahora el recordatorio va en el correo solo
+// si esa dirección es la de la ficha del jinete o la de su cuenta
+// (`correoCoincide`); si no, la deuda sale solo en el [ADMIN].
 type Deuda = {
   anios: Array<{ temporada: number; total: number; cuota: number; caballos: Array<{ nombre: string; costo: number }> }>
   total: number
+  correoCoincide: boolean
 }
 
 const norm = (s: unknown) => String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '')
@@ -113,11 +136,20 @@ async function deudaAfiliacion(record: any): Promise<Deuda | null> {
     // El jinete se busca por nombre normalizado (sin tildes ni mayúsculas): el
     // formulario autocompleta desde el padrón, y en el XIII+XIV 101 de 103
     // inscripciones coincidían exactas. Si hay 0 o más de 1, no se recuerda nada.
-    const { data: jinetes, error: e1 } = await sb.from('jinetes').select('id, nombre')
+    const { data: jinetes, error: e1 } = await sb.from('jinetes').select('id, nombre, email, perfil_id')
     if (e1 || !jinetes) return null
     const k = norm(record.nombre)
     const cand = jinetes.filter((j: any) => norm(j.nombre) === k)
     if (cand.length !== 1) return null
+
+    const correo = (v: unknown) => String(v ?? '').trim().toLowerCase()
+    const conocidos = [correo(cand[0].email)]
+    if (cand[0].perfil_id) {
+      const { data: perfil } = await sb.from('perfiles').select('email').eq('id', cand[0].perfil_id).maybeSingle()
+      conocidos.push(correo(perfil?.email))
+    }
+    const escrito = correo(record.email)
+    const correoCoincide = !!escrito && conocidos.includes(escrito)
 
     const { data: afs, error: e2 } = await sb.from('afiliaciones')
       .select('temporada, monto_esperado, afiliacion_caballos!afiliacion_caballos_afiliacion_id_fkey(nombre_caballo, costo_aplicado)')
@@ -133,7 +165,7 @@ async function deudaAfiliacion(record: any): Promise<Deuda | null> {
       return { temporada: Number(a.temporada), total, cuota, caballos }
     }).filter((a: any) => a.total > 0)
     if (!anios.length) return null
-    return { anios, total: anios.reduce((s: number, a: any) => s + a.total, 0) }
+    return { anios, total: anios.reduce((s: number, a: any) => s + a.total, 0), correoCoincide }
   } catch (e) {
     console.error('Error calculando la deuda de afiliación:', e)
     return null
@@ -226,7 +258,8 @@ serve(async (req) => {
     if (Date.now() - new Date(record.created_at).getTime() > 15 * 60 * 1000) {
       return new Response('Aviso vencido', { status: 409 })
     }
-    const { error: reclamoErr } = await sbSrv.from('notificaciones_enviadas').insert({ ref_id: id, tipo: 'inscripcion' })
+    const destinatario = String(record.email ?? '').trim().toLowerCase()
+    const { error: reclamoErr } = await sbSrv.from('notificaciones_enviadas').insert({ ref_id: id, tipo: 'inscripcion', destinatario })
     if (reclamoErr) {
       if (reclamoErr.code === '23505') {
         return new Response(JSON.stringify({ success: true, skipped: 'ya avisada' }),
@@ -239,41 +272,58 @@ serve(async (req) => {
     // Si el correo al jinete falla, se libera el reclamo para no perder el aviso.
     const liberarReclamo = () => sbSrv.from('notificaciones_enviadas').delete().eq('ref_id', id).eq('tipo', 'inscripcion')
 
+    // Tope de avisos por dirección: una familia inscribe varios binomios con el
+    // mismo correo, pero nadie legítimo pasa de ~10 en un día. Pasado el tope, el
+    // correo al jinete no sale (el [ADMIN] sí, y lo dice): el formulario no sirve
+    // para mandar correos de adescruz.com en cantidad a una dirección.
+    const TOPE_POR_CORREO_DIA = 10
+    let sobreTope = false
+    if (!reclamoErr && destinatario) {
+      const { count } = await sbSrv.from('notificaciones_enviadas').select('ref_id', { count: 'exact', head: true })
+        .eq('tipo', 'inscripcion').eq('destinatario', destinatario)
+        .gte('enviado_en', new Date(Date.now() - 24 * 3600 * 1000).toISOString())
+      sobreTope = (count ?? 0) > TOPE_POR_CORREO_DIA
+    }
+
     const adjunto = await adjuntoComprobante(record)
     const deuda = await deudaAfiliacion(record)
-    const qrs = deuda ? await adjuntosQr(deuda.anios.map((a) => a.temporada)) : []
-    const bloqueDeuda = deuda ? bloqueDeudaJinete(deuda, qrs.length > 0) : ''
-    const attachmentsJinete = [...(adjunto ? [adjunto] : []), ...qrs]
-    const attachments = adjunto ? [adjunto] : undefined
+    const recordarDeuda = !!deuda && deuda.correoCoincide
+    const qrs = recordarDeuda ? await adjuntosQr(deuda!.anios.map((a) => a.temporada)) : []
+    const bloqueDeuda = recordarDeuda ? bloqueDeudaJinete(deuda!, qrs.length > 0) : ''
 
-    // Email 1: To jinete — confirmation receipt (+ recordatorio de afiliación si debe)
-    // NOTE: inscripciones table must have email field — celular is phone only
-    const emailToJinete = await sendEmailViaResend({
-      to: record.email, // FIXED: Use email field, not celular (phone number)
-      subject: `Inscripción recibida — CDS ${record.concurso_id}`,
-      html: generateInscripcionConfirmationEmail(record, !!adjunto, bloqueDeuda),
-      attachments: attachmentsJinete.length ? attachmentsJinete : undefined,
-    })
+    // Email 1: To jinete — confirmation receipt (+ recordatorio de afiliación si debe).
+    // Sin el comprobante adjunto (ver adjuntoComprobante).
+    if (!sobreTope) {
+      const emailToJinete = await sendEmailViaResend({
+        to: record.email,
+        subject: `Inscripción recibida — CDS ${record.concurso_id}`,
+        html: generateInscripcionConfirmationEmail(record, false, bloqueDeuda),
+        attachments: qrs.length ? qrs : undefined,
+      })
 
-    if (!emailToJinete) {
-      await liberarReclamo()
-      return new Response('Failed to send email to jinete', { status: 500 })
+      if (!emailToJinete) {
+        await liberarReclamo()
+        return new Response('Failed to send email to jinete', { status: 500 })
+      }
     }
 
     // Email 2: To admin — notification with full details
-    const deudaAdmin = deuda
-      ? `Debe afiliación: <strong>${bs(deuda.total)}</strong> (${deuda.anios.map((a) => a.temporada).join(', ')}) — se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`
-      : 'Sin afiliación pendiente registrada'
+    const deudaAdmin = (deuda
+      ? `Debe afiliación: <strong>${bs(deuda.total)}</strong> (${deuda.anios.map((a) => a.temporada).join(', ')}) — `
+        + (recordarDeuda
+            ? `se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`
+            : 'NO se le recordó: el correo de la inscripción no es el de su ficha ni el de su cuenta')
+      : 'Sin afiliación pendiente registrada')
+      + (sobreTope ? `<br>⚠️ No se le mandó la confirmación: esa dirección ya recibió más de ${TOPE_POR_CORREO_DIA} avisos en 24 h` : '')
     // En el [ADMIN] el comprobante va INCRUSTADO en el cuerpo (Daniel, 22-sep-2026:
     // «ahí debe ir el archivo, idealmente en el cuerpo del correo, no como
     // adjunto»): imagen inline por Content-ID. Un PDF no se puede mostrar como
     // imagen: queda adjunto y el correo lo dice.
-    const extComp = adjunto ? adjunto.filename.split('.').pop()!.toLowerCase() : ''
-    const esImagen = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(extComp)
+    const esImagen = !!adjunto && ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(adjunto.mime)
     const adjuntoAdmin = adjunto
       ? (esImagen
-          ? { ...adjunto, content_id: 'comprobante', content_type: extComp === 'jpg' ? 'image/jpeg' : `image/${extComp}` }
-          : adjunto)
+          ? { filename: adjunto.filename, content: adjunto.content, content_id: 'comprobante', content_type: adjunto.mime }
+          : { filename: adjunto.filename, content: adjunto.content })
       : null
     const emailToAdmin = await sendEmailViaResend({
       to: ADMIN_EMAIL,

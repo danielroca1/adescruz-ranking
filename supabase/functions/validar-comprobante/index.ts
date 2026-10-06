@@ -204,6 +204,16 @@ serve(async (req) => {
       motivo = `Doble lectura: ${consenso.motivo}`;
     }
 
+    // Pago de más: NO frena la aprobación, solo queda anotado (decisión de Daniel,
+    // 6-oct-2026: «aprobar y avisar»). Caso: Futuros Campeones ambos días, esperado
+    // Bs 200, pagó Bs 500 y se aprobó sin que nadie se enterara. En el admin el
+    // motivo de una aprobada se ve en gris; el jinete no lo ve.
+    const pagado = Number(extracted?.monto);
+    if (Number.isFinite(pagado) && expected > 0 && pagado > expected + 0.5 && estado !== 'rechazada') {
+      const aviso = `Pagó de más: pagó Bs ${pagado}, esperaba Bs ${expected}`;
+      motivo = motivo ? `${motivo}; ${aviso}` : aviso;
+    }
+
     // 7. Anti-reúso ATÓMICO (cross-table, sin race): al APROBAR, reclamar el nro_operacion en
     //    operaciones_consumidas (PK única). Si ya lo consumió OTRO comprobante → reúso → rechazada.
     // Un N° de operación va a una PK: se descarta lo que no sea un código (ver

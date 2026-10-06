@@ -334,7 +334,7 @@ export function parseFechaPago(s: string | null | undefined): string | null {
     enero:0, febrero:1, marzo:2, abril:3, mayo:4, junio:5,
     julio:6, agosto:7, septiembre:8, setiembre:8, octubre:9, noviembre:10, diciembre:11
   };
-  const norm = trimmed.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  const norm = trimmed.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const m = norm.match(/(\d{1,2})\s*de\s*([a-z]+)[,\s]+(?:de\s+)?(\d{4})(?:[\s,]+(?:a\s*las\s*)?(\d{1,2}):(\d{2}))?/i);
   if (m) {
     const day = parseInt(m[1], 10);
@@ -514,7 +514,7 @@ export function validarPago(
     } else {
       // Case-insensitive, sin acentos y con LÍMITES DE PALABRA: evita que "I CDS 2026"
       // matchee dentro de "II CDS 2026" (números romanos que son prefijo de otros).
-      const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+      const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
       const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const reGlosa = new RegExp('\\b' + esc(norm(glosaEsperada).trim()) + '\\b');
       if (!reGlosa.test(norm(glosaCompro))) {

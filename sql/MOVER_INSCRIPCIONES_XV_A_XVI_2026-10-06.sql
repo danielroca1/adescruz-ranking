@@ -60,6 +60,10 @@ select id, concurso_id, nota_admin, now() as respaldado_en
  where concurso_id = 'XV-CDS-2026'
    and coalesce(estado, '') <> 'rechazada';
 
+-- Sin esto la tabla quedaría legible con la clave pública por la API de Supabase.
+-- RLS sin políticas = nadie la lee salvo el SQL Editor / service role.
+alter table _respaldo_mover_xv_xvi_20261006 enable row level security;
+
 select count(*) as filas_respaldadas from _respaldo_mover_xv_xvi_20261006;
 
 

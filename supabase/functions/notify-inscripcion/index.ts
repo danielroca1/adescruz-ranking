@@ -116,7 +116,7 @@ async function adjuntoComprobante(record: any): Promise<{ filename: string; cont
 // (24-sep-2026) — la deuda no es información confidencial ni delicada, dos
 // veces al año se manda un PDF con la deuda de todos.
 type Deuda = {
-  anios: Array<{ temporada: number; total: number; cuota: number; caballos: Array<{ nombre: string; costo: number }> }>
+  anios: Array<{ temporada: number; total: number; cuota: number; aCuenta: number; caballos: Array<{ nombre: string; costo: number }> }>
   total: number
 }
 
@@ -141,7 +141,7 @@ async function deudaAfiliacion(record: any): Promise<Deuda | null> {
     if (cand.length !== 1) return null
 
     const { data: afs, error: e2 } = await sb.from('afiliaciones')
-      .select('temporada, monto_esperado, afiliacion_caballos!afiliacion_caballos_afiliacion_id_fkey(nombre_caballo, costo_aplicado)')
+      .select('temporada, monto_esperado, monto_pagado, afiliacion_caballos!afiliacion_caballos_afiliacion_id_fkey(nombre_caballo, costo_aplicado)')
       .eq('jinete_id', cand[0].id).eq('estado', 'pendiente').is('comprobante_url', null)
       .gte('temporada', 2024).order('temporada')
     if (e2 || !afs || !afs.length) return null
@@ -149,9 +149,13 @@ async function deudaAfiliacion(record: any): Promise<Deuda | null> {
     const anios = afs.map((a: any) => {
       const caballos = (a.afiliacion_caballos || [])
         .map((c: any) => ({ nombre: String(c.nombre_caballo || ''), costo: Number(c.costo_aplicado || 0) }))
-      const total = Number(a.monto_esperado || 0)
-      const cuota = Math.max(0, total - caballos.reduce((s: number, c: any) => s + c.costo, 0))
-      return { temporada: Number(a.temporada), total, cuota, caballos }
+      const esperado = Number(a.monto_esperado || 0)
+      const cuota = Math.max(0, esperado - caballos.reduce((s: number, c: any) => s + c.costo, 0))
+      // Pago a cuenta (Daniel, 5-oct-2026): la afiliación sigue pendiente pero ya
+      // pagó una parte; se recuerda el SALDO, no el total.
+      const aCuenta = esperado > 0 && Number(a.monto_pagado) > 0 ? Number(a.monto_pagado) : 0
+      const total = Math.max(0, Math.round((esperado - aCuenta) * 100) / 100)
+      return { temporada: Number(a.temporada), total, cuota, aCuenta, caballos }
     }).filter((a: any) => a.total > 0)
     if (!anios.length) return null
     return { anios, total: anios.reduce((s: number, a: any) => s + a.total, 0) }
@@ -191,7 +195,7 @@ function bloqueDeudaJinete(deuda: Deuda, conQr: boolean): string {
     const detalle = [
       a.cuota > 0 ? `cuota del jinete ${bs(a.cuota)}` : 'cuota del jinete ya cancelada',
       ...a.caballos.map((c) => `${esc(c.nombre)} ${c.costo > 0 ? bs(c.costo) : '(sin costo)'}`),
-    ].join(' + ')
+    ].join(' + ') + (a.aCuenta > 0 ? ` − pago a cuenta ${bs(a.aCuenta)} = saldo` : '')
     return `<tr>
           <td style="padding: 8px 0; border-bottom: 1px solid #fde68a; color: #92400e; font-size: 13px; font-weight: 600;">Afiliación ${a.temporada}</td>
           <td style="padding: 8px 0; border-bottom: 1px solid #fde68a; color: #111827; font-size: 13px; text-align: right;"><strong>${bs(a.total)}</strong><br><span style="color:#6b7280;font-size:11px;">${detalle}</span></td>

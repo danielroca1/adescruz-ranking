@@ -5,19 +5,31 @@
 //   1. SELECT campeonatos WHERE cierre_activo AND cierre_ejecutado_en IS NULL
 //      AND cierre_fecha <= NOW() AND inscripciones_abiertas
 //   2. For each matching CDS:
-//      a. Build concurso_id ("V-CDS-2026" style) from numero+temporada
-//      b. Fetch its inscriptions filtered by concurso_id
-//      c. Generate Excel grouped by category
-//      d. Email Excel to per-CDS cierre_emails recipients
-//      e. Mark CDS as closed: inscripciones_abiertas=false,
-//         cierre_ejecutado_en=NOW()
+//      a. Reserve the close atomically (reservar_cierre_inscripciones): marks it
+//         closed (inscripciones_abiertas=false, cierre_ejecutado_en=NOW())
+//      b. Generate and SAVE the official entry order (ordenes_ingreso + bucket
+//         ordenes-ingreso) with _shared/orden-ingreso.js — the same code the
+//         admin uses when closing by hand (7-oct-2026)
+//      c. Email the saved files (Saturday and Sunday) to cierre_emails
 //
-// Idempotent: cierre_ejecutado_en gate prevents reprocessing.
+// Idempotent: cierre_ejecutado_en gates re-runs; an email retry re-sends the
+// version already saved, it does not generate a new one.
+//
+// POST { "simular": "<concurso_id>" } with an admin session (or the service key)
+// builds the order and the Excel files for that CDS WITHOUT closing, saving or
+// emailing anything: it is how a deploy is checked against real data.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { serve } from "https://deno.land/std@0.208.0/http/server.ts";
-import * as XLSX from "npm:xlsx";
+import XLSXmod from "npm:xlsx-js-style@1.2.0";
 import { encodeBase64 } from "https://deno.land/std@0.208.0/encoding/base64.ts";
+import * as OI from "../_shared/orden-ingreso.js";
+import { esServicioOAdmin } from "../_shared/acceso.ts";
+
+// xlsx-js-style y no `npm:xlsx`: SheetJS community IGNORA los estilos en silencio
+// (por eso el Excel de antes salía sin formato).
+// deno-lint-ignore no-explicit-any
+const XLSX: any = (XLSXmod as any)?.utils ? XLSXmod : (XLSXmod as any).default;
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL");
 const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
@@ -53,75 +65,13 @@ interface Campeonato {
   numero: number;
   nombre: string;
   temporada: number;
+  fecha_sab: string | null;
+  fecha_dom: string | null;
   cierre_emails: string | null;
 }
 
-interface Inscripcion {
-  id: string;
-  nombre: string;
-  club: string;
-  equino: string;
-  cat_concurso: string;
-  dias: string;
-  celular: string;
-  created_at: string;
-}
-
-// ─── Excel generation ────────────────────────────────────────
-
-async function generateExcel(inscripciones: Inscripcion[]): Promise<string> {
-  const grouped: Record<string, Inscripcion[]> = {};
-  inscripciones.forEach((insc) => {
-    const cat = insc.cat_concurso || "(Sin categoría)";
-    if (!grouped[cat]) grouped[cat] = [];
-    grouped[cat].push(insc);
-  });
-  Object.keys(grouped).forEach((cat) => {
-    grouped[cat].sort((a, b) =>
-      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
-  });
-
-  const wb = XLSX.utils.book_new();
-
-  Object.entries(grouped).forEach(([category, items]) => {
-    const wsData: (string | number)[][] = [
-      ["Orden#", "Nombre", "Club", "Equino", "Días", "Celular"],
-    ];
-    items.forEach((item, idx) => {
-      wsData.push([idx + 1, item.nombre, item.club, item.equino, item.dias, item.celular]);
-    });
-
-    const ws = XLSX.utils.aoa_to_sheet(wsData);
-
-    for (let col = 0; col < 6; col++) {
-      const cellRef = XLSX.utils.encode_cell({ r: 0, c: col });
-      if (ws[cellRef]) {
-        ws[cellRef].s = {
-          font: { bold: true, color: { rgb: "FFFFFFFF" } },
-          fill: { fgColor: { rgb: "FF1a4731" } },
-          alignment: { horizontal: "center" },
-        };
-      }
-    }
-    wsData.forEach((_, rowIdx) => {
-      if (rowIdx === 0) return;
-      const bgColor = rowIdx % 2 === 0 ? "FFFFFFFF" : "FFF0F7F4";
-      for (let col = 0; col < 6; col++) {
-        const cellRef = XLSX.utils.encode_cell({ r: rowIdx, c: col });
-        if (ws[cellRef]) ws[cellRef].s = { fill: { fgColor: { rgb: bgColor } } };
-      }
-    });
-    ws["!cols"] = [8, 25, 20, 25, 12, 15].map((w) => ({ wch: w }));
-
-    // Sheet name max 31 chars and no special chars
-    const safeName = category.substring(0, 31).replace(/[\\/?*[\]:]/g, "_");
-    XLSX.utils.book_append_sheet(wb, ws, safeName);
-  });
-
-  const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-  return encodeBase64(wbout);
-}
+const CAMPEONATO_COLS = "id, numero, nombre, temporada, fecha_sab, fecha_dom, cierre_emails";
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 // ─── Email ───────────────────────────────────────────────────
 
@@ -129,8 +79,7 @@ async function sendEmail(
   to: string[],
   subject: string,
   htmlBody: string,
-  attachmentBase64: string,
-  filename: string,
+  adjuntos: { filename: string; content: string }[],
 ): Promise<boolean> {
   try {
     const response = await fetch("https://api.resend.com/emails", {
@@ -144,11 +93,7 @@ async function sendEmail(
         to,
         subject,
         html: htmlBody,
-        attachments: [{
-          filename,
-          content: attachmentBase64,
-          content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        }],
+        attachments: adjuntos.map((a) => ({ ...a, content_type: XLSX_MIME })),
       }),
     });
     if (!response.ok) {
@@ -161,6 +106,41 @@ async function sendEmail(
     console.error("sendEmail exception:", error);
     return false;
   }
+}
+
+// cat_concurso y los nombres los escribe el formulario público: se escapan (24-sep-2026).
+const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, (ch) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] as string));
+
+// deno-lint-ignore no-explicit-any
+function cuerpoCorreo(c: Campeonato, version: number, orden: any): string {
+  const dias = (["sab", "dom"] as const).filter((d) => orden.dias[d].pruebas.length || orden.dias[d].sinClasificar.length);
+  const resumen = dias.map((d) => {
+    // deno-lint-ignore no-explicit-any
+    const lis = orden.dias[d].pruebas.map((p: any) =>
+      `<li><strong>${esc(p.num)}</strong> — ${p.filas.length} binomio${p.filas.length === 1 ? "" : "s"}</li>`).join("");
+    return `<h3>${d === "sab" ? "Sábado" : "Domingo"}</h3><ul>${lis}</ul>`;
+  }).join("");
+  const avisos: string[] = [];
+  for (const d of dias) {
+    // deno-lint-ignore no-explicit-any
+    orden.dias[d].pruebas.forEach((p: any) => p.avisos.forEach((a: string) => avisos.push(`${d === "sab" ? "Sáb" : "Dom"} · ${p.num}: ${a}`)));
+    // deno-lint-ignore no-explicit-any
+    orden.dias[d].sinClasificar.forEach((f: any) => avisos.push(`${d === "sab" ? "Sáb" : "Dom"} · SIN CLASIFICAR: ${f.nombre} (${f.cat})`));
+  }
+  return `
+<html><body style="font-family: sans-serif; line-height: 1.6; color: #333;">
+  <h2>Cierre de Inscripciones — ${esc(c.nombre)}</h2>
+  <p>Las inscripciones de este concurso quedaron <strong>cerradas</strong>.</p>
+  <p>Se adjunta el <strong>orden de ingreso oficial</strong> (versión ${version}), generado y
+     guardado en el momento del cierre: un archivo por día, con las filas C / B / A arriba de
+     cada prueba para las inscripciones de último momento.</p>
+  ${resumen}
+  ${avisos.length ? `<p style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px"><strong>⚠️ Avisos:</strong><br>${avisos.map(esc).join("<br>")}</p>` : ""}
+  <p><strong>Total:</strong> ${orden.inscripciones} inscripciones (todas menos las rechazadas)</p>
+  <hr style="border:none;border-top:1px solid #ddd;margin:20px 0;">
+  <p style="font-size:12px;color:#666;">Email automático — ADESCRUZ</p>
+</body></html>`;
 }
 
 // ─── Per-CDS processor ───────────────────────────────────────
@@ -189,94 +169,69 @@ async function processCampeonato(c: Campeonato, esReintento = false): Promise<{ 
     return { ok: true, reason: "otra llamada ya lo está procesando" };
   }
 
-  // 2) Fetch this CDS's inscriptions only.
-  //
-  // Filtro PERMISIVO, el que define [[orden-de-ingreso]]: todas menos las
-  // `rechazada`. Antes no habia filtro de estado ninguno, asi que un jinete
-  // rechazado por no pagar aparecia en el Excel que se le manda al jurado como
-  // uno mas de la lista. Encontrado el 19-ago-2026, antes del cierre del XIII.
-  //
-  // Permisivo y no estricto (solo `aprobada`) a proposito: a la hora del cierre
-  // puede haber pagos todavia en `revision_manual` o `pendiente`, y esa gente SI
-  // compite. Dejarlos afuera del orden de ingreso es peor error que incluirlos.
-  //
-  // El `estado.is.null` esta para que una fila con estado nulo no se caiga en
-  // silencio: en Postgres `NULL <> 'rechazada'` no es TRUE, asi que un `.neq`
-  // pelado la descartaria sin avisar.
-  const { data: inscripciones, error: inscErr } = await supabase
-    .from("inscripciones")
-    .select("id, nombre, club, equino, cat_concurso, dias, celular, created_at, estado")
-    .eq("concurso_id", concursoId)
-    .or("estado.is.null,estado.neq.rechazada")
-    .order("cat_concurso", { ascending: true })
-    .order("created_at", { ascending: true });
-
-  if (inscErr) {
-    console.error(`Failed to fetch inscripciones for ${concursoId}:`, inscErr);
-    return { ok: false, reason: `fetch failed: ${inscErr.message}` };
-  }
-
-  if (!inscripciones || inscripciones.length === 0) {
+  // 2) El orden oficial (7-oct-2026). Filtro PERMISIVO, el de [[orden-de-ingreso]]:
+  //    todo menos lo `rechazada` — a la hora del cierre puede haber pagos en
+  //    revisión, y esa gente compite. Lo aplica _shared/orden-ingreso.js, igual
+  //    que en el admin.
+  const inscripciones = await OI.leerInscripciones(supabase, concursoId);
+  if (!inscripciones.some(OI.entraAlOrden)) {
     console.log(`No inscriptions for ${concursoId} — closing without email`);
     await marcarEmailEnviado(c.id);  // nada que mandar → no reintentar
     return { ok: true, reason: "no inscriptions, closed silently" };
   }
 
-  // 3) Recipients (per-CDS)
-  const recipients = (c.cierre_emails || "")
-    .split(",").map((e) => e.trim()).filter((e) => e);
-
-  if (recipients.length === 0) {
-    console.warn(`No cierre_emails for ${concursoId} — closed but no email sent`);
-    await marcarEmailEnviado(c.id);  // sin destinatarios → es config, no error transitorio: no reintentar
-    return { ok: true, reason: "closed but no recipients configured" };
+  // Un reintento del correo manda la versión YA guardada (no genera otra): lo que
+  // reciben los jueces tiene que ser lo que quedó guardado al cierre.
+  // deno-lint-ignore no-explicit-any
+  let guardado: { version: number; archivos: Record<string, string>; orden: any } | null = null;
+  if (esReintento) {
+    const { data: prev } = await supabase.from("ordenes_ingreso")
+      .select("version, archivos, orden").eq("concurso_id", concursoId).eq("origen", "cierre_automatico")
+      .order("version", { ascending: false }).limit(1);
+    if (prev && prev.length) guardado = prev[0];
+  }
+  if (!guardado) {
+    try {
+      guardado = await OI.guardarOrdenOficial({
+        sb: supabase, XLSX, origen: "cierre_automatico",
+        campeonato: { id: c.id, nombre: c.nombre, fecha_sab: c.fecha_sab, fecha_dom: c.fecha_dom, concurso_id: concursoId },
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`No se pudo guardar el orden de ${concursoId}:`, e);
+      return { ok: false, reason: `orden de ingreso: ${msg} — se reintenta en el próximo tick` };
+    }
   }
 
-  // 4) Build Excel + summary
-  const excelBase64 = await generateExcel(inscripciones as Inscripcion[]);
-  const dateStr = new Date().toISOString().split("T")[0];
-  const filename = `Lista_Inscritos_${concursoId}_${dateStr}.xlsx`;
+  // 3) Recipients (per-CDS). El orden ya quedó guardado aunque no haya a quién mandarlo.
+  const recipients = (c.cierre_emails || "")
+    .split(",").map((e) => e.trim()).filter((e) => e);
+  if (recipients.length === 0) {
+    console.warn(`No cierre_emails for ${concursoId} — closed, order saved, no email sent`);
+    await marcarEmailEnviado(c.id);  // sin destinatarios → es config, no error transitorio: no reintentar
+    return { ok: true, reason: `closed, order v${guardado.version} saved, no recipients configured` };
+  }
 
-  const countByCat: Record<string, number> = {};
-  (inscripciones as Inscripcion[]).forEach((i) => {
-    countByCat[i.cat_concurso] = (countByCat[i.cat_concurso] || 0) + 1;
-  });
-  // cat_concurso lo escribe el formulario público: se escapa (24-sep-2026).
-  const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, (ch) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch] as string));
-  const summaryHtml = Object.entries(countByCat)
-    .map(([cat, n]) => `<li><strong>${esc(cat)}:</strong> ${n} inscripción${n === 1 ? "" : "es"}</li>`)
-    .join("");
-
-  const emailBody = `
-<html><body style="font-family: sans-serif; line-height: 1.6; color: #333;">
-  <h2>Cierre de Inscripciones — ${c.nombre}</h2>
-  <p>Las inscripciones de este concurso quedaron <strong>cerradas</strong>.</p>
-  <p>Se adjunta la <strong>lista de inscritos agrupada por categoría</strong>, en orden de
-     inscripción.</p>
-  <p style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px 12px">
-     <strong>⚠️ Este archivo no es el orden de ingreso.</strong> El orden de ingreso definitivo
-     —con las pruebas armadas según el reglamento— lo genera y envía la administración de
-     ADESCRUZ por separado.</p>
-  <h3>Resumen por categoría:</h3>
-  <ul>${summaryHtml}</ul>
-  <p><strong>Total:</strong> ${inscripciones.length} inscripciones</p>
-  <p>Archivo: <code>${filename}</code></p>
-  <hr style="border:none;border-top:1px solid #ddd;margin:20px 0;">
-  <p style="font-size:12px;color:#666;">Email automático — ADESCRUZ</p>
-</body></html>`;
+  // 4) Los archivos guardados, tal cual, como adjuntos.
+  const adjuntos: { filename: string; content: string }[] = [];
+  for (const dia of ["sab", "dom"]) {
+    const ruta = guardado.archivos?.[dia];
+    if (!ruta) continue;
+    const { data: blob, error: dlErr } = await supabase.storage.from("ordenes-ingreso").download(ruta);
+    if (dlErr || !blob) return { ok: false, reason: `no se pudo leer ${ruta}: ${dlErr?.message} — se reintenta` };
+    adjuntos.push({ filename: ruta.split("/").pop()!, content: encodeBase64(new Uint8Array(await blob.arrayBuffer())) });
+  }
 
   const sent = await sendEmail(
     recipients,
-    `Cierre de Inscripciones — ${c.nombre} — Lista de Inscritos`,
-    emailBody,
-    excelBase64,
-    filename,
+    `Cierre de Inscripciones — ${c.nombre} — Orden de Ingreso (v${guardado.version})`,
+    cuerpoCorreo(c, guardado.version, guardado.orden),
+    adjuntos,
   );
 
   if (sent) {
     await marcarEmailEnviado(c.id);
-    return { ok: true, reason: `closed + emailed ${recipients.length} recipient(s)` };
+    return { ok: true, reason: `closed + order v${guardado.version} saved + emailed ${recipients.length} recipient(s)` };
   }
   // Email falló (error transitorio): NO marcamos cierre_email_enviado_en → el cron reintenta.
   return { ok: false, reason: "email send failed — will retry next tick" };
@@ -284,12 +239,29 @@ async function processCampeonato(c: Campeonato, esReintento = false): Promise<{ 
 
 // Marca que el orden de ingreso ya fue manejado (enviado, o sin nada que enviar).
 // Mientras esté en NULL y el CDS ya cerró, el cron reintenta el envío.
-async function marcarEmailEnviado(id: string): Promise<void> {
+async function marcarEmailEnviado(id: number): Promise<void> {
   const { error } = await supabase
     .from("campeonatos")
     .update({ cierre_email_enviado_en: new Date().toISOString() })
     .eq("id", id);
   if (error) console.error(`Failed to mark cierre_email_enviado_en for ${id}:`, error);
+}
+
+// ─── Simulación (solo admin / clave de servicio) ─────────────
+
+async function simular(concursoId: string) {
+  const inscripciones = await OI.leerInscripciones(supabase, concursoId);
+  const orden = OI.generarOrdenConcurso(inscripciones);
+  const bytes: Record<string, number> = {};
+  for (const dia of ["sab", "dom"] as const) {
+    const d = orden.dias[dia];
+    if (!d.pruebas.length && !d.sinClasificar.length) continue;
+    const wb = OI.libroOrdenDia(XLSX, { titulo: `SIMULACIÓN — ${concursoId} — ${OI.DIA_TXT[dia]}`, subtitulo: "simulación: no se guardó ni se mandó nada", dia: d });
+    const datos = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+    bytes[dia] = datos.byteLength ?? datos.length;
+  }
+  return { simulado: true, algoritmo: OI.ORDEN_INGRESO_VERSION, concurso_id: concursoId,
+           inscripciones: orden.inscripciones, avisos: OI.contarAvisos(orden), excel_bytes: bytes, orden };
 }
 
 // ─── Main ────────────────────────────────────────────────────
@@ -300,7 +272,7 @@ async function runCierre() {
   // Find pending closures
   const { data: pendientes, error } = await supabase
     .from("campeonatos")
-    .select("id, numero, nombre, temporada, cierre_emails")
+    .select(CAMPEONATO_COLS)
     .eq("cierre_activo", true)
     .eq("inscripciones_abiertas", true)
     .is("cierre_ejecutado_en", null)
@@ -313,9 +285,9 @@ async function runCierre() {
   }
 
   const results = [];
-  const processedIds = new Set<string>();
+  const processedIds = new Set<number>();
 
-  // A) Cierres nuevos: cerrar inscripciones + mandar el orden de ingreso
+  // A) Cierres nuevos: cerrar inscripciones + guardar y mandar el orden de ingreso
   for (const c of (pendientes || []) as Campeonato[]) {
     processedIds.add(c.id);
     try {
@@ -332,7 +304,7 @@ async function runCierre() {
   //    (ej. Resend falló en un tick anterior). Re-cerrar es idempotente.
   const { data: reintentos, error: reErr } = await supabase
     .from("campeonatos")
-    .select("id, numero, nombre, temporada, cierre_emails")
+    .select(CAMPEONATO_COLS)
     .not("cierre_ejecutado_en", "is", null)
     .is("cierre_email_enviado_en", null)
     .eq("cierre_activo", true);
@@ -352,9 +324,21 @@ async function runCierre() {
   return { processed: results.length, results };
 }
 
-serve(async (_req) => {
-  const result = await runCierre();
-  return new Response(JSON.stringify(result, null, 2), {
-    headers: { "Content-Type": "application/json" },
+serve(async (req) => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body, null, 2), {
+    status, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*",
+                       "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type" },
   });
+  if (req.method === "OPTIONS") return json({ ok: true });
+
+  // ¿Simulación? Solo con sesión de admin o la clave de servicio.
+  let body: Record<string, unknown> = {};
+  try { body = await req.json(); } catch (_) { /* el cron manda {} o nada */ }
+  if (typeof body.simular === "string" && body.simular) {
+    if (!(await esServicioOAdmin(supabase, req))) return json({ error: "Solo un administrador puede simular" }, 403);
+    try { return json(await simular(body.simular)); }
+    catch (e) { return json({ error: e instanceof Error ? e.message : String(e) }, 500); }
+  }
+
+  return json(await runCierre());
 });

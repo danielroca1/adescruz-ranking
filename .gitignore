@@ -6,3 +6,6 @@ node_modules/
 
 # Cache local del CLI de Supabase (project-ref, versiones, pooler url)
 supabase/.temp/
+
+# Datos reales para las pruebas del orden de ingreso (nombres de jinetes): no se suben
+scripts/orden-ingreso/inscripciones_reales.json

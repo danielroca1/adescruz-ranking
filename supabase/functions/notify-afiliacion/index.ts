@@ -34,6 +34,8 @@ interface CaballoRow {
 
 const RESEND_API_KEY = Deno.env.get('RESEND_API_KEY')
 const ADMIN_EMAIL = 'daniel.roca.s@gmail.com'
+const esc = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!))
 
 serve(async (req) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 })
@@ -77,19 +79,30 @@ serve(async (req) => {
     const totalCaballos = lista.reduce((s, c) => s + Number(c.costo_aplicado || 0), 0)
     const total = Number(record.monto_esperado ?? record.total_pago ?? (costoJinete + totalCaballos))
 
+    // Si falla el correo al jinete, el [ADMIN] sale igual y lo dice (8-oct-2026):
+    // antes se cortaba acá y no salía ninguno. Mismo arreglo que notify-inscripcion
+    // v10, por la inscripción de Micaela Navia (7-oct, correo terminado en punto).
     const emailToJinete = await sendEmailViaResend({
       to: record.email,
       subject: `Afiliación recibida — ADESCRUZ Temporada ${record.temporada}`,
       html: jineteHtml(record, lista, costoJinete, total),
     })
-    if (!emailToJinete) return new Response('Failed to send email to jinete', { status: 500 })
+    const falloJinete = !emailToJinete
 
     const emailToAdmin = await sendEmailViaResend({
       to: ADMIN_EMAIL,
       subject: `[ADMIN] Nueva afiliación — ${record.nombre}`,
-      html: adminHtml(record, lista, costoJinete, total),
+      html: adminHtml(record, lista, costoJinete, total,
+        falloJinete ? `Resend rechazó la dirección «${esc(record.email)}». Avisarle por otro medio.` : ''),
     })
-    if (!emailToAdmin) return new Response('Failed to send email to admin', { status: 500 })
+    if (!emailToAdmin) {
+      return new Response(falloJinete ? 'Failed to send email to jinete and admin' : 'Failed to send email to admin', { status: 500 })
+    }
+    if (falloJinete) {
+      return new Response(JSON.stringify({ success: false, message: 'Admin notified; email to jinete failed' }), {
+        headers: { 'Content-Type': 'application/json' }, status: 502,
+      })
+    }
 
     return new Response(JSON.stringify({ success: true }), {
       headers: { 'Content-Type': 'application/json' }, status: 200,
@@ -204,7 +217,7 @@ function jineteHtml(record: AfiliacionRecord, caballos: CaballoRow[], costoJinet
 </html>`
 }
 
-function adminHtml(record: AfiliacionRecord, caballos: CaballoRow[], costoJinete: number, total: number): string {
+function adminHtml(record: AfiliacionRecord, caballos: CaballoRow[], costoJinete: number, total: number, avisoJinete = ''): string {
   const estadoColor = record.estado === 'pendiente' ? '#f59e0b' : record.estado === 'aprobada' ? '#10b981' : record.estado === 'rechazada' ? '#dc2626' : '#f59e0b'
   const cabRows = caballosRowsHtml(caballos)
 
@@ -222,6 +235,7 @@ function adminHtml(record: AfiliacionRecord, caballos: CaballoRow[], costoJinete
       <p style="margin: 0 0 24px 0; color: #111827; font-size: 14px;">
         <strong>Nueva solicitud de afiliación recibida</strong> — Temporada ${record.temporada}
       </p>
+      ${avisoJinete ? `<div style="margin: 0 0 24px 0; padding: 12px 16px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; color: #991b1b; font-size: 14px;">⚠️ <strong>No se le pudo mandar la confirmación al jinete</strong>: ${avisoJinete}</div>` : ''}
       <table style="width: 100%; border-collapse: collapse; margin: 20px 0; background: #f9fafb; border-radius: 8px; overflow: hidden;">
         <tr><td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">ID:</td><td style="padding: 12px 16px; color: #111827; font-size: 12px; border-bottom: 1px solid #e5e7eb; font-family: monospace;">${record.id}</td></tr>
         <tr><td style="padding: 12px 16px; color: #6b7280; font-size: 13px; border-bottom: 1px solid #e5e7eb;">Nombre:</td><td style="padding: 12px 16px; color: #111827; font-size: 13px; border-bottom: 1px solid #e5e7eb; font-weight: 600;">${record.nombre}</td></tr>

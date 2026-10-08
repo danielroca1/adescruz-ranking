@@ -269,8 +269,6 @@ serve(async (req) => {
       // inscripción real no se pierde por un control extra.
       console.error('notificaciones_enviadas:', reclamoErr.message)
     }
-    // Si el correo al jinete falla, se libera el reclamo para no perder el aviso.
-    const liberarReclamo = () => sbSrv.from('notificaciones_enviadas').delete().eq('ref_id', id).eq('tipo', 'inscripcion')
 
     // Topes: una familia inscribe varios binomios con el mismo correo, pero nadie
     // legítimo pasa de ~10 en un día; y el pico medido es de 11 inscripciones en
@@ -297,6 +295,11 @@ serve(async (req) => {
 
     // Email 1: To jinete — confirmation receipt (+ recordatorio de afiliación si debe).
     // Sin el comprobante adjunto (ver adjuntoComprobante).
+    // Si falla, el [ADMIN] sale igual y lo dice (8-oct-2026): antes se cortaba acá y
+    // no salía ninguno — la inscripción de Micaela Navia (7-oct, correo terminado en
+    // punto) quedó aprobada sin que el admin se enterara. El reclamo no se libera:
+    // nadie reintenta, y liberarlo solo serviría para duplicar el [ADMIN].
+    let falloJinete = false
     if (!sobreTope) {
       const emailToJinete = await sendEmailViaResend({
         to: record.email,
@@ -304,19 +307,16 @@ serve(async (req) => {
         html: generateInscripcionConfirmationEmail(record, false, bloqueDeuda),
         attachments: qrs.length ? qrs : undefined,
       })
-
-      if (!emailToJinete) {
-        await liberarReclamo()
-        return new Response('Failed to send email to jinete', { status: 500 })
-      }
+      falloJinete = !emailToJinete
     }
 
     // Email 2: To admin — notification with full details
     const deudaAdmin = (deuda
       ? `Debe afiliación: <strong>${bs(deuda.total)}</strong> (${deuda.anios.map((a) => a.temporada).join(', ')}) — `
-        + (sobreTope ? 'no se le recordó (ver abajo)' : `se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`)
+        + (sobreTope || falloJinete ? 'no se le recordó (ver abajo)' : `se le recordó en su correo${qrs.length ? ', con ' + qrs.length + ' QR adjunto(s)' : ''}`)
       : 'Sin afiliación pendiente registrada')
       + (sobreTope ? `<br>⚠️ No se le mandó la confirmación: ${sobreTope}` : '')
+      + (falloJinete ? `<br>⚠️ <strong>No se le pudo mandar la confirmación al jinete</strong>: Resend rechazó la dirección «${esc(record.email)}». Avisarle por otro medio.` : '')
     // En el [ADMIN] el comprobante va INCRUSTADO en el cuerpo (Daniel, 22-sep-2026:
     // «ahí debe ir el archivo, idealmente en el cuerpo del correo, no como
     // adjunto»): imagen inline por Content-ID. Un PDF no se puede mostrar como
@@ -335,7 +335,13 @@ serve(async (req) => {
     })
 
     if (!emailToAdmin) {
-      return new Response('Failed to send email to admin', { status: 500 })
+      return new Response(falloJinete ? 'Failed to send email to jinete and admin' : 'Failed to send email to admin', { status: 500 })
+    }
+    if (falloJinete) {
+      return new Response(
+        JSON.stringify({ success: false, message: 'Admin notified; email to jinete failed' }),
+        { headers: { 'Content-Type': 'application/json' }, status: 502 }
+      )
     }
 
     return new Response(

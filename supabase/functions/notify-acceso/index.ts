@@ -156,8 +156,8 @@ function generateAccesoAdminNotificationEmail(record: any) {
       </table>
 
       <p style="margin: 24px 0 0 0; color: #6b7280; font-size: 13px; line-height: 1.6;">
-        Revisa esta solicitud en el panel de administración e<br>
-        <strong>aprueba</strong> o <strong>rechaza</strong> el acceso según corresponda.
+        Revise esta solicitud en el panel de administración y<br>
+        <strong>apruebe</strong> o <strong>rechace</strong> el acceso según corresponda.
       </p>
 
       <!-- Action button -->

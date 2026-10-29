@@ -218,7 +218,7 @@ serve(async (req) => {
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const base64 = bytesToBase64(bytes);
-    const mediaType = detectMediaType(insc.comprobante_url);
+    const mediaType = detectMediaType(insc.comprobante_url, bytes);
 
     // 5. OCR con Claude — DOS lecturas (22-sep-2026): solo se aprueba solo si coinciden
     let extracted, consenso;
@@ -291,7 +291,7 @@ serve(async (req) => {
       titular_origen: extracted.titular_origen || null,
       fecha_pago: extracted.fecha_pago || null,
       glosa: extracted.glosa || null,
-      validacion_ocr: { extracted, validacion: { estado, motivo, expected }, consenso, prompt: 'v23', ts: new Date().toISOString() },
+      validacion_ocr: { extracted, validacion: { estado, motivo, expected }, consenso, prompt: 'v24', ts: new Date().toISOString() },
       revisado_en: new Date().toISOString(),
       motivo_rechazo: motivo,
       lectura_iniciada_en: null,

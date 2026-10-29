@@ -150,9 +150,10 @@ serve(async (req) => {
 
       const { data: f, error: dle } = await sb.storage.from('comprobantes').download(ruta);
       if (dle || !f) return jsonResp({ error: 'No se pudo bajar el comprobante: ' + (dle?.message || '?') }, 400);
-      const mt = detectMediaType(ruta);
+      const fb = new Uint8Array(await f.arrayBuffer());
+      const mt = detectMediaType(ruta, fb);
       let leido;
-      try { leido = await callClaudeVision(bytesToBase64(new Uint8Array(await f.arrayBuffer())), mt, apiKey); }
+      try { leido = await callClaudeVision(bytesToBase64(fb), mt, apiKey); }
       catch (err) { return jsonResp({ error: 'No se pudo leer el comprobante: ' + err.message }, 502); }
       leido.fecha_pago = parseFechaPago(leido.fecha_pago);
 
@@ -262,7 +263,7 @@ serve(async (req) => {
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
     const base64 = bytesToBase64(bytes);
-    const mediaType = detectMediaType(afil.comprobante_url);
+    const mediaType = detectMediaType(afil.comprobante_url, bytes);
 
     // 6. OCR con Claude — DOS lecturas (22-sep-2026): solo se aprueba solo si coinciden
     let extracted, consenso;

@@ -20,7 +20,11 @@
 // del llamado lo escribía como "Error OCR" y mandaba la fila a revisión manual,
 // así que el sistema no rechazó a nadie — simplemente dejó de leer comprobantes,
 // y las 8 inscripciones del XIII las verificó Daniel a mano, una por una.
-const CLAUDE_MODEL = 'claude-sonnet-4-5';   // multimodal, soporta vision
+// 🔧 28-oct-2026: claude-sonnet-4-5 → claude-sonnet-5-5. Sonnet 4.5 copiaba mal los N° largos
+// (Mercantil, BCP) y a veces igual en las dos lecturas: así se aprobaron solos pagos con el N°
+// equivocado. Sonnet 5.5 piensa por defecto: se apaga con thinking «between_tools» (con 1024
+// tokens el pensamiento se comería la respuesta). No acepta `temperature`: no se manda.
+const CLAUDE_MODEL = 'claude-sonnet-5-5';   // multimodal, soporta vision
 const CLAUDE_API   = 'https://api.anthropic.com/v1/messages';
 
 export const VALIDACION = {
@@ -39,9 +43,15 @@ export const corsHeaders = {
 // XIII y el XIV contra la tabla de verdad: N° de operación 75 % → 97 %, glosa 81 % → 100 %,
 // banco 82 % → 98 %; BNB con error 26/36 → 3/36; Ganadero sigue 0/34. El texto fuente vive en
 // scripts/ocr-harness/prompts/v23-banco.txt: cualquier cambio se mide ahí ANTES de tocarlo acá.
+// 🔧 v24 (28-oct-2026): los formatos nuevos de los bancos (BNB «Bancarización» sola y monto sin
+// decimales, Económico con el mes en letras, billeteras Yasta y Yolo Pago), el BCP de 16 dígitos
+// SIN el ejemplo falso de 15 (era un N° mal copiado a mano el 6-oct: el modelo nuevo lo obedecía y
+// se comía un cero) y «el JSON una sola vez, el N° sin invisibles». Va con claude-sonnet-5-5.
+// Medido en el harness con doble lectura: 87 recientes (XVI + afiliaciones) aprobadas 67 → 75 e
+// incorrectas 3 → 0; los 112 del XIII y el XIV, 89 → 102 y 2 → 0. Fuente: prompts/v24-banco.txt.
 export const PROMPT_OCR = `You are an OCR specialist analyzing a Bolivian bank transfer or QR payment receipt (comprobante de pago bancario).
 
-Extract these fields and return ONLY a single valid JSON object — no markdown, no commentary, no code fences.
+Extract these fields and return ONLY a single valid JSON object — no markdown, no commentary, no code fences. Write the object once and nothing after it: if you want to correct something, correct it inside the object (or explain it in "notas").
 
 Required JSON shape:
 {
@@ -65,18 +75,19 @@ STEP 1 — IDENTIFY THE BANK FIRST, then apply that bank's rules. The bank name 
 
 PER-BANK RULES (where each field is on each bank's receipt):
 
-- BNB ("BNB — Comprobante Electrónico", green): "nro_operacion" = the value labelled "Bancarización Débito" — exactly 10 characters: 1 digit + 1 LETTER + 8 digits (count them; if you read 9 characters, one is missing: re-read or return null) (e.g. "2P75612112", "1P73708747", "2O01951503"; the second character is a letter, usually P, sometimes O). NEVER use "Bancarización Abono" (it is a different code), NEVER use the long "Comprobante:" string with asterisks (it contains dates, codes and account numbers and is NOT the operation number), and NEVER use "Referencia" — "Referencia" is the GLOSA. The origin account is masked and the destination bank is usually not printed (leave "banco_destino" null). Time is printed on its own line ("Hora de la transacción").
+- BNB ("BNB — Comprobante Electrónico", green): "nro_operacion" = the value labelled "Bancarización Débito" (or just "Bancarización" in the variants "Transferencia interbancaria" and "Pago QR - Tarjeta de Crédito", which print only one) — exactly 10 characters: 1 digit + 1 LETTER + 8 digits (count them; if you read 9 characters, one is missing: re-read or return null) (e.g. "2P75612112", "1P73708747", "2O01951503"; the second character is a letter, usually P, sometimes O). NEVER use "Bancarización Abono" (it is a different code), NEVER use the long "Comprobante:" string with asterisks (it contains dates, codes and account numbers and is NOT the operation number), and NEVER use "Referencia" — "Referencia" is the GLOSA. The amount may be printed without decimals ("La suma de Bs.: 696"). A masked card number ("4430********4637") is the payer's card, not an account. The origin account is masked and the destination bank is usually not printed (leave "banco_destino" null). Time is printed on its own line ("Hora de la transacción").
 - Banco Ganadero ("¡Pago QR realizado!" / "¡Pago QR exitoso!", green): "nro_operacion" = "Número de operación" or "Nro." at the bottom, 9-10 digits. The glosa is the free text line below the amount (no label). Date and time are printed together ("21/09/2026 - 16:06 hrs"); no seconds.
-- BCP / Banco de Crédito ("Banca Móvil — Comprobante", orange/blue): "nro_operacion" = "Número de transacción", DIGITS ONLY: "07" + the date as YYMMDD + a counter of 7 or 8 digits (15 or 16 digits in total, e.g. "0726091700256711", "072610060103672"); if it is split across two lines, join the digits. Copy every digit exactly as printed: never add a zero or any other digit to reach a certain length. The receipt has TWO blocks with the same inner labels ("A nombre de", "Del banco"): the block labelled "De la cuenta" is the ORIGIN and the block labelled "A la cuenta" is the DESTINATION — decide by the label, never by position (their order changes between variants). The glosa is "Motivo" (it may start with "BM QR "). Some variants do not print the destination name: then "titular_destino" is null — do not fill it with the payer.
+- BCP / Banco de Crédito ("Banca Móvil — Comprobante", orange/blue): "nro_operacion" = "Número de transacción", DIGITS ONLY: "07" + the date as YYMMDD + a counter of 8 digits — 16 digits in total (e.g. "0726091700256711", "0726100600103672"); it is printed on the line below its label and may wrap to a second line ("07261001000479" + "89"): join the digits. Copy every digit exactly as printed: never add a zero or any other digit to reach a certain length. The receipt has TWO blocks with the same inner labels ("A nombre de", "Del banco"): the block labelled "De la cuenta" is the ORIGIN and the block labelled "A la cuenta" is the DESTINATION — decide by the label, never by position (their order changes between variants). The glosa is "Motivo" (it may start with "BM QR "). Some variants do not print the destination name: then "titular_destino" is null — do not fill it with the payer.
 - Banco Mercantil Santa Cruz ("¡Transferencia exitosa!" in the app, or "Transferencia realizada exitosamente" on the web; bank name only in the logo): "nro_operacion" = "Código" / "Código de transacción", DIGITS ONLY: "1003" + the date as YYYYMMDD + a counter whose length VARIES (usually 17-19 digits in total, e.g. "10032026100235378", "1003202609181719167") — never a letter. Copy every digit exactly as printed; never add or drop a digit to reach a certain length. "cuenta_destino" = the 10-digit number on the "Cuenta destino" line (e.g. 2000274154). The line "CI / NIT 6210702" (7-8 digits) under it is the holder's ID card — it is NEVER the account; do not put it in "cuenta_destino". "banco_origen" is "Banco Mercantil Santa Cruz" even though only the logo shows it.
-- Banco Económico ("Pago con QR — Pago completado"): "nro_operacion" = "Nro. de transacción", 9 digits (not "Código de autorización"). The glosa is the preloaded field labelled "Nota:" or "Motivo:" — NEVER "Nota del cliente:" (that is free text typed by the payer; ignore it). "NIT o carnet" printed next to the destination is an ID, not the account.
+- Banco Económico ("Pago con QR — Pago completado"): "nro_operacion" = "Nro. de transacción", 9 digits (8 for a transfer inside Banco Económico) — not "Código de autorización". The date reads "08/Oct/2026 19:27:36" (month abbreviated in Spanish letters). The glosa is the preloaded field labelled "Nota:" or "Motivo:" — NEVER "Nota del cliente:" (that is free text typed by the payer; ignore it). "NIT o carnet" printed next to the destination is an ID, not the account.
 - BancoSol ("altoke" / "¡Pago QR realizado!" purple / "BTS Transferencia ACH"): "nro_operacion" = "Transacción" or "Número de comprobante", formatted like "18092026/295/398/012/9405" — copy it WITH the slashes. Glosa = "Detalle" / "Descripción".
 - BISA ("Pago QR realizado" / "Tu pago se realizó correctamente"): "nro_operacion" = "Número de transacción" (11 digits). The app variant also prints "Número de operación e-BISA" (9 digits): IGNORE it. In the destination block, "CI/NIT" is an ID, not the account; the account is the 10-digit line below the name.
+- Yasta ("¡Tu Recibo Yasta!") and Yolo Pago ("yolo pago — Envío realizado") are wallets: "banco_origen" = "Yasta" / "Yolo Pago". Yasta: "nro_operacion" = "Número de transacción" (10 digits), NOT "Número de orden" (20 digits). Yolo Pago: "nro_operacion" = the number after "Nº" on the date line; convert "pm" times to 24 h.
 - Banco Unión ("UNI móvil plus — COMPROBANTE DE PAGO"; bank name in the watermark): "nro_operacion" = "Transacción N°", 20 digits, usually split across two lines — join them. "Referencia" is the GLOSA.
 
 GENERAL RULES:
 - "nro_operacion" IS A CODE, NEVER A DESCRIPTION. Concept text like "XIV CDS 2026", "Pago Afiliacion Adescruz 2026" or a person's name is the GLOSA — put it in "glosa" and never in "nro_operacion". A wrong operation number is worse than null: the system treats it as a unique payment identifier.
-- Copy numbers character by character. Where the bank's pattern says a position is a digit, read it as a digit (do not output "S" for "5", "O" for "0", "B" for "8"). If you genuinely cannot tell a character, set "nro_operacion" to null and explain in "notas" — do not guess.
+- Copy numbers character by character, as plain characters only: no spaces, no zero-width or other invisible characters inside "nro_operacion". Where the bank's pattern says a position is a digit, read it as a digit (do not output "S" for "5", "O" for "0", "B" for "8"). If you genuinely cannot tell a character, set "nro_operacion" to null and explain in "notas" — do not guess.
 - If a field is unclear or absent, use null. Do NOT invent data. Do not fill "banco_destino" or "titular_destino" when they are not printed.
 - DATES ARE BOLIVIAN: numeric dates are DAY/MONTH/YEAR (DD/MM/YYYY). "01/06/2026" means 1 June 2026. Months may be written in Spanish ("9 de Septiembre, 2026 a las 19:28"). Output "fecha_pago" with day and month in the CORRECT positions and the time exactly as printed, no timezone.
 - "monto" is the AMOUNT TRANSFERRED (not balance, not commission).
@@ -99,6 +110,7 @@ export async function callClaudeVision(imageBase64: string, mediaType: string, a
     body: JSON.stringify({
       model: CLAUDE_MODEL,
       max_tokens: 1024,
+      thinking: { type: 'between_tools' },
       messages: [{
         role: 'user',
         content: [
@@ -116,12 +128,32 @@ export async function callClaudeVision(imageBase64: string, mediaType: string, a
     throw new Error(`Claude API ${res.status}: ${txt}`);
   }
   const json = await res.json();
-  const text = json?.content?.[0]?.text;
+  // El primer bloque de TEXTO (con pensamiento, content[0] puede ser un bloque `thinking`).
+  const text = (json?.content ?? []).find((b: { type?: string }) => b?.type === 'text')?.text;
   if (!text) throw new Error('Claude returned no text content');
   // Strip code fences if Claude added them despite instructions
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
   try { return JSON.parse(cleaned); }
-  catch (e) { throw new Error(`Claude returned non-JSON: ${cleaned.slice(0, 200)}`); }
+  catch (e) {
+    // Sonnet 5.5 a veces escribe el objeto y después una «Correction: …» (medido el 28-oct):
+    // se toma el PRIMER objeto JSON completo del texto.
+    const obj = primerObjetoJson(cleaned);
+    if (obj) return obj;
+    throw new Error(`Claude returned non-JSON: ${cleaned.slice(0, 200)}`);
+  }
+}
+function primerObjetoJson(t: string): Record<string, unknown> | null {
+  const i = t.indexOf('{');
+  if (i < 0) return null;
+  let prof = 0, enTexto = false, escape = false;
+  for (let j = i; j < t.length; j++) {
+    const c = t[j];
+    if (enTexto) { if (escape) escape = false; else if (c === '\\') escape = true; else if (c === '"') enTexto = false; continue; }
+    if (c === '"') enTexto = true;
+    else if (c === '{') prof++;
+    else if (c === '}' && --prof === 0) { try { return JSON.parse(t.slice(i, j + 1)); } catch { return null; } }
+  }
+  return null;
 }
 // ─── Doble lectura: dos lecturas independientes tienen que coincidir ─────────
 // Medido el 22-sep-2026 (harness, 112 comprobantes, 2 lecturas cada uno): los
@@ -150,7 +182,19 @@ export async function leerConConsenso(imageBase64: string, mediaType: string, ap
   return { extracted, consenso: { coincide, motivo, nro2: n2, monto2: isNaN(m2) ? null : m2 } };
 }
 
-export function detectMediaType(filename: string): string {
+// 🔧 28-oct-2026: el tipo sale de los primeros bytes del archivo, y la extensión solo si no
+// los reconoce. Un JPEG subido con nombre «.png» (Isabella Trujillo, XVI) se mandaba como
+// image/png, la API respondía 400 y el pago caía a «Error OCR».
+export function detectMediaType(filename: string, bytes?: Uint8Array): string {
+  if (bytes && bytes.length >= 12) {
+    const b = bytes;
+    if (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) return 'image/jpeg';
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'image/png';
+    if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+        && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+    if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x38) return 'image/gif';
+    if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'application/pdf';
+  }
   const ext = filename.toLowerCase().split('.').pop();
   if (ext === 'png')  return 'image/png';
   if (ext === 'webp') return 'image/webp';
@@ -237,7 +281,12 @@ export function clasificarCuentaDestino(
 // siguiente que la leyera igual chocaba como "comprobante repetido".
 export function normalizarNroOperacion(v: unknown): string | null {
   if (v === null || v === undefined) return null;
-  const s = String(v).trim();
+  // 🔧 28-oct-2026: Sonnet 5.5 mete a veces un espacio invisible (U+200B) o un espacio común
+  // dentro de un código largo del Mercantil, con los dígitos bien. Se quitan los invisibles, y
+  // grupos que son SOLO dígitos (9 o más en total) se juntan. Una frase con letras («XIV CDS
+  // 2026») sigue teniendo espacios y se descarta abajo.
+  let s = String(v).replace(/[\u200B-\u200F\u2060\uFEFF]/g, '').trim();
+  if (/^\d+( \d+)+$/.test(s) && s.replace(/ /g, '').length >= 9) s = s.replace(/ /g, '');
   if (!s) return null;
   if (/\s/.test(s)) return null;                    // "XIII CDS 2026" — es una frase
   if ((s.match(/[0-9]/g) || []).length < 5) return null;  // pocos dígitos: no es un comprobante

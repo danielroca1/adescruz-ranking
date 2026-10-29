@@ -57,6 +57,8 @@ export function bancoCanon(s) {
   if (/fassil/.test(n)) return 'Fassil';
   if (/prodem/.test(n)) return 'Prodem';
   if (/fortaleza/.test(n)) return 'Fortaleza';
+  if (/yasta/.test(n)) return 'Yasta';
+  if (/yolo/.test(n)) return 'Yolo';
   if (/tigo|yape|billetera/.test(n)) return 'Billetera';
   return 'Otro: ' + String(s).trim().slice(0, 30);
 }

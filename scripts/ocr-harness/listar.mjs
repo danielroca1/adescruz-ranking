@@ -8,13 +8,24 @@
 // un comprobante puede cubrir varias filas (hermanos, dos días), y el harness
 // lee imágenes, no filas. Cada archivo lleva sus filas con lo que la base
 // guardó de la lectura vieja (`validacion_ocr.extracted`) para comparar.
+//
+// Por defecto, el set del 22-sep-2026 (XIII y XIV + todas las afiliaciones).
+// Para un set nuevo (28-oct-2026, formatos nuevos de los bancos):
+//   --concursos XVI-CDS-2026[,XVII-CDS-2026]   qué concursos
+//   --desde 2026-09-01                          solo filas creadas desde esa fecha
+//                                               (inscripciones y afiliaciones)
 // ============================================================================
 import path from 'node:path';
 import { leerEnv, postgrestGet, rutas, escribirJson, ahora, args, sinSecretos } from './lib.mjs';
 import { detectMediaType } from '../../supabase/functions/_shared/validacion-pagos.ts';
 
-const CONCURSOS = ['XIII-CDS-2026', 'XIV-CDS-2026'];
-const ROMANOS = { XIII: 13, XIV: 14 };
+const CONCURSOS_DEFECTO = ['XIII-CDS-2026', 'XIV-CDS-2026'];
+const romanoANum = (r) => {
+  const v = { I: 1, V: 5, X: 10, L: 50 };
+  let n = 0;
+  for (let i = 0; i < r.length; i++) n += (v[r[i]] < (v[r[i + 1]] ?? 0) ? -1 : 1) * v[r[i]];
+  return n;
+};
 
 const COLS_INS = 'id,nombre,concurso_id,estado,comprobante_url,nro_operacion,monto_pagado,monto_esperado,'
   + 'banco_origen,glosa,fecha_pago,titular_origen,cat_concurso,dias,equino,created_at,revisado_por,motivo_rechazo,validacion_ocr';
@@ -23,6 +34,9 @@ const COLS_AFI = 'id,nombre,temporada,estado,comprobante_url,nro_operacion,monto
 
 async function main() {
   const a = args();
+  const CONCURSOS = a.concursos ? String(a.concursos).split(',').map((x) => x.trim()).filter(Boolean) : CONCURSOS_DEFECTO;
+  const ROMANOS = Object.fromEntries(CONCURSOS.map((c) => [c.split('-')[0], romanoANum(c.split('-')[0])]));
+  const desde = a.desde ? `&created_at=gte.${encodeURIComponent(String(a.desde))}` : '';
   const env = leerEnv();
   const R = rutas();
   const log = (s) => console.log(sinSecretos(s));
@@ -30,9 +44,9 @@ async function main() {
   log(`Consultando ${new URL(env.NEXT_PUBLIC_SUPABASE_URL).host} (solo SELECT)…`);
   const [ins, afi, camps, cfg] = await Promise.all([
     postgrestGet(env, 'inscripciones',
-      `select=${COLS_INS}&concurso_id=in.(${CONCURSOS.join(',')})&comprobante_url=not.is.null&order=created_at.asc`, { log }),
+      `select=${COLS_INS}&concurso_id=in.(${CONCURSOS.join(',')})&comprobante_url=not.is.null${desde}&order=created_at.asc`, { log }),
     postgrestGet(env, 'afiliaciones',
-      `select=${COLS_AFI}&comprobante_url=not.is.null&order=created_at.asc`, { log }),
+      `select=${COLS_AFI}&comprobante_url=not.is.null${desde}&order=created_at.asc`, { log }),
     postgrestGet(env, 'campeonatos',
       `select=numero,temporada,glosa_esperada,inscripciones_abiertas,cierre_ejecutado_en&temporada=eq.2026&numero=in.(${Object.values(ROMANOS).join(',')})`, { log }),
     postgrestGet(env, 'site_config', `select=key,value&key=eq.afiliacion_glosa_esperada`, { log }),
@@ -121,7 +135,7 @@ async function main() {
 
   const set = {
     generado: ahora(),
-    fuente: { host: new URL(env.NEXT_PUBLIC_SUPABASE_URL).host, concursos: CONCURSOS, afiliaciones: 'todas con comprobante' },
+    fuente: { host: new URL(env.NEXT_PUBLIC_SUPABASE_URL).host, concursos: CONCURSOS, desde: a.desde ?? null, afiliaciones: a.desde ? `con comprobante, desde ${a.desde}` : 'todas con comprobante' },
     glosas,
     resumen,
     archivos,

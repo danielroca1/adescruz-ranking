@@ -31,12 +31,18 @@ import { PROMPT_OCR, parseFechaPago, normalizarNroOperacion, detectMediaType } f
 
 // Réplica de las constantes privadas de _shared/validacion-pagos.ts. Si allá
 // cambian, `verificarConstantes()` avisa (no se puede importar lo que no se exporta).
-const CLAUDE_MODEL = 'claude-sonnet-4-5';
+const CLAUDE_MODEL = 'claude-sonnet-5-5';   // producción desde el 28-oct-2026 (antes claude-sonnet-4-5)
 const CLAUDE_API = 'https://api.anthropic.com/v1/messages';
 const MAX_TOKENS = 1024;
 // USD por millón de tokens. ⚠️ A VERIFICAR contra la página de precios: el
 // skill de referencia no lista Sonnet 4.5 (sí Sonnet 4.6 a 3/15).
-const PRECIOS_USD_POR_MTOK = { 'claude-sonnet-4-5': { input: 3, output: 15 } };
+const PRECIOS_USD_POR_MTOK = {
+  'claude-sonnet-4-5': { input: 3, output: 15 },
+  // De la referencia de la API (cacheada al 6-oct-2026), 28-oct-2026:
+  'claude-sonnet-5-5': { input: 2, output: 10 },
+  'claude-opus-5-5': { input: 4, output: 20 },
+  'claude-haiku-5-5': { input: 0.1, output: 0.5 },
+};
 
 function verificarConstantes(log) {
   const src = fs.readFileSync(MODULO_COMPARTIDO, 'utf8');
@@ -52,10 +58,13 @@ function verificarConstantes(log) {
 }
 
 // Réplica de callClaudeVision() con el prompt como parámetro (y temperature opcional).
-export async function leerConPrompt(base64, mediaType, prompt, { apiKey, temperature, log = null } = {}) {
+// `modelo` y `pensar` sirven para medir otro modelo (28-oct-2026). Los modelos 5.x piensan
+// por defecto: «off» manda thinking between_tools (Sonnet 5.5) y «low»/«medium» fijan el
+// esfuerzo; con pensamiento, max_tokens sube para que no se coma la respuesta.
+export async function leerConPrompt(base64, mediaType, prompt, { apiKey, temperature, log = null, modelo = CLAUDE_MODEL, pensar = null, jsonTolerante = false } = {}) {
   const body = {
-    model: CLAUDE_MODEL,
-    max_tokens: MAX_TOKENS,
+    model: modelo,
+    max_tokens: pensar && pensar !== 'off' ? 8000 : MAX_TOKENS,
     messages: [{
       role: 'user',
       content: [
@@ -67,6 +76,8 @@ export async function leerConPrompt(base64, mediaType, prompt, { apiKey, tempera
     }],
   };
   if (typeof temperature === 'number') body.temperature = temperature;
+  if (pensar === 'off') body.thinking = { type: 'between_tools' };
+  else if (pensar) body.output_config = { effort: pensar };
 
   const t0 = performance.now();
   const res = await fetchConReintento(CLAUDE_API, {
@@ -80,12 +91,33 @@ export async function leerConPrompt(base64, mediaType, prompt, { apiKey, tempera
     throw Object.assign(new Error(`Claude API ${res.status}: ${txt.slice(0, 300)}`), { status: res.status, latencia_ms });
   }
   const json = await res.json();
-  const text = json?.content?.[0]?.text;
+  const text = (json?.content ?? []).find((b) => b.type === 'text')?.text;
   const base = { usage: json.usage ?? null, stop_reason: json.stop_reason ?? null, modelo: json.model ?? null, latencia_ms };
   if (!text) throw Object.assign(new Error('Claude returned no text content'), base);
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
   try { return { ...base, extracted: JSON.parse(cleaned) }; }
-  catch { throw Object.assign(new Error(`Claude returned non-JSON: ${cleaned.slice(0, 200)}`), { ...base, crudo: cleaned.slice(0, 500) }); }
+  catch (e) {
+    // --json-tolerante (propuesta, 28-oct-2026): Sonnet 5.5 a veces escribe el objeto y
+    // después una «Correction…». Se toma el PRIMER objeto JSON completo del texto.
+    if (!jsonTolerante) throw Object.assign(new Error(`Claude returned non-JSON: ${cleaned.slice(0, 200)}`), { ...base, crudo: cleaned.slice(0, 500) });
+    const obj = primerObjetoJson(cleaned);
+    if (obj) return { ...base, extracted: obj, json_tolerante: true };
+    throw Object.assign(new Error(`Claude returned non-JSON: ${cleaned.slice(0, 200)}`), { ...base, crudo: cleaned.slice(0, 500) });
+  }
+}
+
+function primerObjetoJson(t) {
+  const i = t.indexOf('{');
+  if (i < 0) return null;
+  let prof = 0, enTexto = false, escape = false;
+  for (let j = i; j < t.length; j++) {
+    const c = t[j];
+    if (enTexto) { if (escape) escape = false; else if (c === '\\') escape = true; else if (c === '"') enTexto = false; continue; }
+    if (c === '"') enTexto = true;
+    else if (c === '{') prof++;
+    else if (c === '}' && --prof === 0) { try { return JSON.parse(t.slice(i, j + 1)); } catch { return null; } }
+  }
+  return null;
 }
 
 function cargarPrompt(spec) {
@@ -107,8 +139,13 @@ async function main() {
   const rep = Math.max(1, Number(a.rep || 1));
   const conc = Math.min(3, Math.max(1, Number(a.conc || 3)));   // ≤3 por regla de la casa
   const temperature = a.temperature !== undefined ? Number(a.temperature) : undefined;
-  const salida = a.out || path.join(R.dir, `lecturas_${prompt.nombre}${cual === 'orig' ? '_orig' : ''}.json`);
-  const precios = PRECIOS_USD_POR_MTOK[CLAUDE_MODEL];
+  const modelo = a.modelo || CLAUDE_MODEL;
+  // Como producción: Sonnet 5.5 con el pensamiento apagado y el JSON tolerante. Para medir el
+  // modelo viejo: --modelo claude-sonnet-4-5 --pensar ninguno --json-estricto.
+  const pensar = a.pensar === 'ninguno' ? null : (a.pensar || (modelo === 'claude-sonnet-5-5' ? 'off' : null));
+  const sufijo = (modelo === CLAUDE_MODEL ? '' : `_${modelo}${pensar ? '-' + pensar : ''}`) + (a['json-estricto'] ? '_estricto' : '');
+  const salida = a.out || path.join(R.dir, `lecturas_${prompt.nombre}${sufijo}${cual === 'orig' ? '_orig' : ''}.json`);
+  const precios = PRECIOS_USD_POR_MTOK[modelo] ?? { input: NaN, output: NaN };
 
   const avisos = verificarConstantes(log);
 
@@ -130,7 +167,7 @@ async function main() {
   const out = {
     meta: {
       prompt: { nombre: prompt.nombre, origen: prompt.origen, sha256: crypto.createHash('sha256').update(prompt.texto).digest('hex'), chars: prompt.texto.length },
-      modelo: CLAUDE_MODEL, max_tokens: MAX_TOKENS, temperature: temperature ?? null,
+      modelo, pensar, max_tokens: MAX_TOKENS, temperature: temperature ?? null,
       set: cual, set_dir: cual === 'orig' ? R.orig : R.comp, rep, concurrencia: conc,
       inicio: previo?.meta?.inicio ?? ahora(), fin: null,
       llamadas: previo?.meta?.llamadas ?? 0, tokens: previo?.meta?.tokens ?? { input: 0, output: 0 },
@@ -147,7 +184,7 @@ async function main() {
   }
   const tope = a['max-llamadas'] ? Number(a['max-llamadas']) : items.length * rep;
   if (pendientes.length > tope) throw new Error(`Harían falta ${pendientes.length} llamadas y el tope es ${tope} (--max-llamadas).`);
-  log(`prompt «${prompt.nombre}» (${prompt.texto.length} chars) · modelo ${CLAUDE_MODEL} · set ${cual} · rep ${rep} · ${items.length} archivos · ${pendientes.length} llamadas pendientes`
+  log(`prompt «${prompt.nombre}» (${prompt.texto.length} chars) · modelo ${modelo}${pensar ? ' (pensar ' + pensar + ')' : ''} · set ${cual} · rep ${rep} · ${items.length} archivos · ${pendientes.length} llamadas pendientes`
     + (temperature !== undefined ? ` · temperature ${temperature}` : '') + `\nsalida → ${salida}`);
   if (!pendientes.length) { log('Nada pendiente.'); return; }
 
@@ -170,10 +207,10 @@ async function main() {
       log(`${tag}  SIN ARCHIVO`); guardar(); return;
     }
     const buf = fs.readFileSync(local);
-    const mediaType = detectMediaType(path.basename(local));
+    const mediaType = detectMediaType(path.basename(local), new Uint8Array(buf));   // por los bytes, como producción
     entrada.media_type = mediaType; entrada.bytes = buf.length;
     try {
-      const r = await leerConPrompt(buf.toString('base64'), mediaType, prompt.texto, { apiKey: env.ANTHROPIC_API_KEY, temperature, log });
+      const r = await leerConPrompt(buf.toString('base64'), mediaType, prompt.texto, { apiKey: env.ANTHROPIC_API_KEY, temperature, log, modelo, pensar, jsonTolerante: !a['json-estricto'] });
       const ex = r.extracted;
       entrada.reps.push({
         extracted: ex,

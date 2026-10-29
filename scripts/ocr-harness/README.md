@@ -43,11 +43,15 @@ salida. Los informes de dos prompts se leen lado a lado: mismas tablas, mismo se
 
 | Script | Flag | Qué hace |
 |---|---|---|
+| `listar.mjs` | `--concursos XVI-CDS-2026` | otros concursos (por defecto XIII y XIV) · `--desde 2026-09-01` solo filas creadas desde esa fecha |
 | `bajar.mjs` | `--rehacer` | vuelve a bajar todo · `--conc N` paralelismo (3) |
 | `comprimir.py` | `--orig/--comp/--out` | rutas; por defecto las de `HARNESS_DIR` |
 | `leer.mjs` | `--prompt actual\|ruta.txt` | «actual» importa `PROMPT_OCR` del módulo compartido: mide exactamente producción |
 | | `--set comp\|orig` | imágenes comprimidas (lo que recibe producción hoy) u originales del bucket |
 | | `--rep N` | lecturas por imagen (1 no mide varianza; 3 sí) |
+| | `--modelo ID` | otro modelo (por defecto el de producción); la salida lleva el modelo en el nombre |
+| | `--pensar off\|low\|medium` | para los modelos 5.x, que piensan por defecto: `off` = `thinking: between_tools` (Sonnet 5.5); `low`/`medium` = esfuerzo (Opus 5.5 no deja apagarlo) |
+| | `--json-estricto` | sin tomar el primer objeto JSON cuando el modelo escribe algo después (producción lo toma desde el 28-oct) · para medir el modelo viejo: `--modelo claude-sonnet-4-5 --pensar ninguno --json-estricto` |
 | | `--temperature X` | opcional; producción no la fija (default 1) |
 | | `--solo texto` · `--limite N` | subconjunto, para pruebas de humo |
 | | `--rehacer` | ignora lo ya leído. **Por defecto reanuda**: si la salida ya tiene una lectura buena de una imagen, no la vuelve a pedir |
@@ -129,7 +133,7 @@ $N scripts/ocr-harness/comparar.mjs --set scripts/ocr-harness/ejemplos/set_ejemp
 
 ## Costo y tiempo por corrida (medido el 22-sep-2026)
 
-Modelo `claude-sonnet-4-5`, `max_tokens 1024`, imágenes comprimidas: **~2.400 tokens de entrada y
+Modelo `claude-sonnet-4-5` (hasta el 28-oct; desde entonces `claude-sonnet-5-5`, ≈ US$ 0,013 por lectura), `max_tokens 1024`, imágenes comprimidas: **~2.400 tokens de entrada y
 ~250 de salida por imagen**, ~7 s por llamada, 3 en paralelo. **112 imágenes × 1 rep ≈ 0,3 M tokens
 de entrada ≈ US$ 1,2** (a US$ 3 / 15 por millón de tokens — precio a verificar en la página de
 precios; `leer.mjs` lo estima en `meta.costo_usd_estimado`). Con `--rep 3` y dos prompts, ≈ US$ 7.
